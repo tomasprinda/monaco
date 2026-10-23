@@ -29,7 +29,8 @@ tests/         Tests
 The repo root must contain two directories, `data/` and `outputs/`. For now they are plain
 directories; later they may become symlinks to storage elsewhere, so code should only ever reach
 them through these paths (`monaco.DATA_DIR`, `monaco.OUTPUTS_DIR`) and never assume they are
-real directories inside the repo. Neither is committed apart from a `.gitkeep`.
+real directories inside the repo. Neither is tracked by git at all; after cloning, create them
+(`mkdir data outputs`) or symlink them to where the data lives.
 
 - `data/` holds input data: downloaded or hand-collected datasets that analyses read from.
 - `outputs/` holds everything analyses produce, one directory per run:

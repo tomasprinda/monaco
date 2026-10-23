@@ -9,11 +9,9 @@ __pycache__/
 dist/
 build/
 
-# Input data and generated outputs (keep the folders, not their contents)
-data/*
-!data/.gitkeep
-outputs/*
-!outputs/.gitkeep
+# Input data and generated outputs are never tracked (no trailing slash, so symlinks match too)
+/data
+/outputs
 
 # OS / editor
 .DS_Store
