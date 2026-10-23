@@ -10,3 +10,8 @@
   the entry-point script's name (e.g. `scripts/foo.py` → `outputs/foo/`) or another descriptive
   name, and the timestamp is the run's start time. Create it with `monaco.output_dir(name)`; never
   write files directly into `outputs/` or overwrite a previous run.
+
+## Git
+
+- Never commit or push unless explicitly asked to in that request. Leave changes in the working
+  tree (staging is fine) and let the user commit and push.
