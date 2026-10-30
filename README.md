@@ -17,7 +17,7 @@ uv sync                 # installs Python 3.15 if needed, creates .venv, install
 
 ```
 src/monaco/    Python helpers shared across analyses (paths, loaders, ...)
-scripts/       Analysis entry points
+scripts/       Analyses, one directory each: scripts/<yyyymmdd>_<name>/
 notebooks/     Jupyter notebooks for interactive exploration
 data/          Input datasets (git-ignored)
 outputs/       Generated results (git-ignored)

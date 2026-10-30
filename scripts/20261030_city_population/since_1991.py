@@ -1,11 +1,11 @@
 # ruff: noqa: E501  (long lines are prose inside the HTML report template)
 """How the population of Czech cities evolves in time.
 
-Reads the latest download from data/raw/city_population/ (see city_population_download.py) and
+Reads the latest download from data/raw/city_population/ (see download.py) and
 writes processed data, candidate charts, the main social-media image and an HTML report to
-outputs/city_population/<yymmdd_hhmmss>/.
+outputs/city_population_since_1991/<yymmdd_hhmmss>/.
 
-Usage: uv run scripts/city_population.py
+Usage: uv run scripts/20261030_city_population/since_1991.py
 """
 
 import base64
@@ -541,7 +541,7 @@ population, mostly by unregistered emigrants); therefore we avoid comparing 2001
 <h2>Step by step</h2>
 <ol>
 <li>Searched ČSÚ open data; picked 130149 (yearly, 2000–2024) and 170240 (censuses since 1869).</li>
-<li>Downloaded raw zips + CSVW schemas with <code>scripts/city_population_download.py</code>.</li>
+<li>Downloaded raw zips + CSVW schemas with <code>download.py</code>.</li>
 <li>Kept totals for both sexes; reshaped to one row per municipality; joined on municipality code.</li>
 <li>Noticed the 2021 drop (−185k) and 2022 jump (+311k) in the national series → identified as census
 rebasing and refugee registration; chose census 1991 as the base and showed 2024 as "today".</li>
@@ -622,7 +622,7 @@ code{font-size:13px}
 
 
 def main() -> None:
-    out = monaco.output_dir(Path(__file__).stem)
+    out = monaco.output_dir("city_population_since_1991")
     raw = latest_raw()
     yearly = load_yearly(raw)
     census = load_census(raw)

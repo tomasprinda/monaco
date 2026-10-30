@@ -7,6 +7,11 @@
   via `monaco.DATA_DIR` / `monaco.OUTPUTS_DIR`, never assume they are real directories in the repo.
 - Neither is tracked by git (both fully git-ignored, no `.gitkeep`). Never commit data or outputs.
 - Every run writes to its own directory: `outputs/<name>/<yymmdd_hhmmss>/`, where `<name>` is
-  the entry-point script's name (e.g. `scripts/foo.py` → `outputs/foo/`) or another descriptive
+  the analysis name (e.g. `scripts/20261030_foo/` → `outputs/foo/`) or another descriptive
   name, and the timestamp is the run's start time. Create it with `monaco.output_dir(name)`; never
   write files directly into `outputs/` or overwrite a previous run.
+
+## Data analyses
+
+- Each analysis lives in `scripts/<yyyymmdd>_<analysis_name>/`. Follow
+  `claude/data_analysis_instructions.md` when doing a data analysis.
