@@ -37,6 +37,11 @@ SOURCES = {
     "csu_cpi": {
         "010022.csv": "https://csu.gov.cz/docs/107508/cfcf22e1-06b0-92a6-cf41-fb554acc545a/010022-25data011326.csv?version=1.0",
     },
+    # ČNB Financial Stability Report 2015/2016. Indicator table part 1 (PDF page 160), row TN.4:
+    # flat price / annual rent (IRI offer data), the basis of the rent level in variants B and D.
+    "cnb_zfs": {
+        "fs_2015-2016.pdf": "https://www.cnb.cz/export/sites/cnb/cs/financni-stabilita/.galleries/zpravy_fs/fs_2015-2016/fs_2015-2016.pdf",
+    },
     # ČNB daily exchange rates, one file per year.
     "cnb_fx": {
         f"kurzy_{y}.txt": "https://www.cnb.cz/cs/financni-trhy/devizovy-trh/kurzy-devizoveho-trhu/"

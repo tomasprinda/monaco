@@ -1,17 +1,13 @@
 # ruff: noqa: E501  (long lines are Czech prose inside the HTML report and post texts)
 """How 10 years of investing would have turned out (2Q 2016 → 2Q 2026), from a Czech investor's view.
 
-Compares S&P 500 (dividends reinvested), gold, a savings account, an average Czech flat bought for
-cash and the same flat bought with an 80 % mortgage at the interest rate of the time. Everything is
-in CZK.
+Puts 1 mil. Kč in once (no further contributions) into S&P 500 (dividends reinvested), gold, a
+savings account, an average Czech flat bought for cash and rented out, and the same flat bought with
+the 1 mil. Kč as a 20 % down payment on a mortgage at the interest rate of the time, also rented out.
+Everything is in CZK.
 
-Fair comparison: every strategy gets exactly the same money at the same time — 1 mil. Kč at the
-start plus, every month, the amount of the mortgage installment. The mortgage strategy pays the
-installment; the others invest it.
-
-Variant B instead puts 1 mil. Kč in once and adds the flats rented out / left empty, with and without
-a mortgage. Their monthly cash flow (rent − costs − installment) may be negative; it is charted
-separately (B2) and the cumulative cash flow is part of the flat's net result.
+The flats' monthly cash flow (rent − costs − installment) may be negative; it is charted separately
+(B2), counted in the flat's net result (B, C) and in its IRR as further investment (D).
 
 Reads the latest download from data/raw/investment_comparison/ (see download.py) and writes
 processed data, one social-media image per variant, post texts and a Czech HTML report to
@@ -60,14 +56,18 @@ SOURCE = (
 )
 SOURCE_B = (
     "Zdroje: ČSÚ (ceny starších bytů), ČNB (sazby hypoték a vkladů, kurz USD/CZK), R. Shiller\n"
-    "(S&P 500 vč. dividend), Světová banka (zlato), Eurostat/ČSÚ (inflace a nájemné v HICP). Vše v korunách.\n"
+    "(S&P 500 vč. dividend), Světová banka (zlato), Eurostat/ČSÚ (inflace, nájemné), ČNB/IRI (výše nájmu 2016).\n"
     "Nezapočteno: daň z příjmu z nájmu, poplatky, úrok z hotovosti. Minulé výnosy nezaručují budoucí."
 )
 
-# Variant B: rented flats. Gross rent as a share of the 2016 price (estimate, see report), one
-# month a year empty, owner costs (repair fund, insurance, property tax, repairs) as a share of the
-# 2016 price. Rent grows with HICP actual rentals (CP041), costs with HICP total.
-GROSS_YIELD = 0.05
+# Rented flats (variants B, D). Gross rent = 2016 price / PRICE_TO_RENT: ČNB Financial Stability
+# Report 2015/2016, indicator table part 1 (PDF page 160), row TN.4 "Poměr cena bytu / roční
+# nájemné (dle IRI)", latest value (early 2016) 21.9; 2015 average 21.5. One month a year empty,
+# owner costs (repair fund, insurance, property tax, repairs) as a share of the 2016 price. Rent
+# grows with HICP actual rentals (CP041), costs with HICP total.
+URL_ZFS = "https://www.cnb.cz/export/sites/cnb/cs/financni-stabilita/.galleries/zpravy_fs/fs_2015-2016/fs_2015-2016.pdf"
+PRICE_TO_RENT = 21.9
+GROSS_YIELD = 1 / PRICE_TO_RENT
 VACANCY = 1 / 12
 OWNER_COST = 0.01
 SAVINGS_TAX = 0.15  # withholding tax on deposit interest
@@ -80,18 +80,16 @@ GRID = "#e1e0d9"
 AXIS = "#c3c2b7"
 SURFACE = "#fcfcfb"
 STRATEGIES = {  # key: (label, colour)
-    "byt_hypo": ("Byt s 80% hypotékou", "#2a78d6"),
+    "byt_hypo_najem": ("Pronajatý byt s hypotékou", "#2a78d6"),
     "sp500": ("Akcie S&P 500", "#eb6834"),
-    "byt": ("Byt bez hypotéky", "#1baf7a"),
+    "byt_najem": ("Pronajatý byt bez hypotéky", "#1baf7a"),
     "zlato": ("Zlato", "#eda100"),
     "sporici": ("Spořicí účet", "#6250d6"),
 }
-A_KEYS = ["byt_hypo", "sp500", "byt", "zlato"]
-B_FLATS = {  # key: (label, colour, linestyle); rented = solid, empty = dotted
-    "byt_hypo_najem": ("Byt s hypotékou, pronajatý", "#2a78d6", "-"),
-    "byt_hypo": ("Byt s hypotékou, prázdný", "#2a78d6", ":"),
-    "byt_najem": ("Byt bez hypotéky, pronajatý", "#1baf7a", "-"),
-    "byt": ("Byt bez hypotéky, prázdný", "#1baf7a", ":"),
+FLATS = ["byt_hypo_najem", "byt_najem"]
+D_LABELS = {
+    "byt_hypo_najem": "Pronajatý byt\ns 80% hypotékou",
+    "byt_najem": "Pronajatý byt\nbez hypotéky",
 }
 plt.rcParams.update(
     {
@@ -320,9 +318,10 @@ class Scenario:
     fixation: str = "I"  # ČNB rate series used at the start and at every refixation
     fix_months: int = 60  # refixation period; >= horizon means the starting rate holds throughout
     ltv: float = 0.8
-    buy_cost: float = 0.0  # one-off purchase costs as a share of the flat price, paid in cash
+    buy_cost: float = 0.0  # one-off purchase costs as a share of the flat price, paid from OWN
+    gross_yield: float = GROSS_YIELD  # rent per year as a share of the flat price at the start
+    owner_cost: float = OWNER_COST  # owner costs per year as a share of the flat price at the start
     spx_dividends: bool = True
-    rent_yield: float = 0.0  # net rent per year as a share of the flat value at the start
 
 
 def mortgage(price: float, sc: Scenario, months: pd.PeriodIndex, mir: pd.DataFrame) -> pd.DataFrame:
@@ -355,72 +354,13 @@ def irr(cashflows: np.ndarray) -> float:
     return (1 + mid) ** 12 - 1
 
 
-def simulate(d: Data, sc: Scenario) -> dict:
-    """Wealth paths of all strategies when each gets OWN at the start + the installment monthly."""
-    months = pd.period_range(mid_month(sc.start), mid_month(sc.end), freq="M")
-    flat = flat_monthly(d.flats[sc.region], months)
-    spx_usd = d.spx["tr"] if sc.spx_dividends else d.spx["P"]
-    prices = {
-        "sp500": (spx_usd * d.usd).reindex(months),
-        "zlato": (d.gold * d.usd).reindex(months),
-        "byt": flat * (1 + sc.buy_cost),
-        "sporici": savings_index(d.dep["term_1y"], months),
-    }
-    assert not any(p.isna().any() for p in prices.values()), "missing monthly prices"
+def flat_strategies(d: Data, sc: Scenario) -> dict:
+    """Rented flats for OWN put in once: bought for cash or with a mortgage.
 
-    price0 = OWN / (1 - sc.ltv + sc.buy_cost)  # flat price bought with OWN as down payment + costs
-    sched = mortgage(price0, sc, months, d.mir)
-    pay = sched["payment"].reindex(months, fill_value=0.0)
-    invested = OWN + pay.cumsum()
-
-    paths = {}
-    units = {}
-    for key, px in prices.items():
-        units[key] = OWN / px.iloc[0] + (pay / px).cumsum()
-        paths[key] = units[key] * px
-    flat_value = price0 * flat / flat.iloc[0]
-    paths["byt_hypo"] = flat_value - sched["balance"].reindex(months).fillna(price0 * sc.ltv)
-
-    if sc.rent_yield:
-        # Net rent per unit of flat grows with the HICP actual-rentals index; kept as cash.
-        rent_idx = d.hicp["CP041"].reindex(months)
-        rent_per_unit = sc.rent_yield / 12 * flat.iloc[0] * rent_idx / rent_idx.iloc[0]
-        rent_unit = rent_per_unit.shift(1, fill_value=0.0)  # first rent a month after purchase
-        paths["byt"] = paths["byt"] + (units["byt"].shift(1, fill_value=0) * rent_unit).cumsum()
-        flat_units = price0 / flat.iloc[0]
-        paths["byt_hypo"] = paths["byt_hypo"] + (flat_units * rent_unit).cumsum()
-
-    paths = pd.DataFrame(paths)[list(STRATEGIES)]
-    cf = -np.concatenate([[OWN], pay.iloc[1:].values])
-    final = paths.iloc[-1]
-    irrs = {}
-    for key in paths:
-        flows = cf.copy()
-        flows[-1] += final[key]
-        irrs[key] = irr(flows)
-    return {
-        "sc": sc,
-        "months": months,
-        "paths": paths,
-        "invested": invested,
-        "sched": sched,
-        "price0": price0,
-        "final": final,
-        "irr": pd.Series(irrs),
-        "total_in": invested.iloc[-1],
-        "prices": pd.DataFrame(prices).assign(byt=flat),
-    }
-
-
-def flat_strategies(d: Data, sc: Scenario | None = None, gross_yield: float = GROSS_YIELD,
-                    owner_cost: float = OWNER_COST) -> dict:  # fmt: skip
-    """Variant B flats for 1 mil. Kč put in once: bought for cash or with a mortgage, rented or empty.
-
-    Monthly cash flow = net rent (rented only) − owner costs − installment (mortgage only); it starts
+    Monthly cash flow = net rent − owner costs − installment (mortgage only); it starts
     the month after purchase. Net result = flat value − remaining debt + cumulative cash flow, i.e.
     out-of-pocket top-ups are subtracted and surpluses kept as cash without interest.
     """
-    sc = sc or Scenario()
     months = pd.period_range(mid_month(sc.start), mid_month(sc.end), freq="M")
     flat = flat_monthly(d.flats[sc.region], months)
     growth = flat / flat.iloc[0]
@@ -428,31 +368,28 @@ def flat_strategies(d: Data, sc: Scenario | None = None, gross_yield: float = GR
     cost_g = d.hicp["TOTAL"].reindex(months) / d.hicp["TOTAL"].reindex(months).iloc[0]
     after_purchase = pd.Series(np.arange(len(months)) > 0, index=months).astype(float)
 
-    big = OWN / (1 - sc.ltv)  # flat bought with OWN as the down payment
+    big = OWN / (1 - sc.ltv + sc.buy_cost)  # OWN covers the down payment and purchase costs
+    small = OWN / (1 + sc.buy_cost)
     sched = mortgage(big, sc, months, d.mir)
     pay = sched["payment"].reindex(months, fill_value=0.0)
     debt = sched["balance"].reindex(months).fillna(big * sc.ltv)
 
     def rent(price0: float) -> pd.Series:
-        return gross_yield / 12 * (1 - VACANCY) * price0 * rent_g * after_purchase
+        return sc.gross_yield / 12 * (1 - VACANCY) * price0 * rent_g * after_purchase
 
     def costs(price0: float) -> pd.Series:
-        return owner_cost / 12 * price0 * cost_g * after_purchase
+        return sc.owner_cost / 12 * price0 * cost_g * after_purchase
 
     cf = pd.DataFrame(
         {
             "byt_hypo_najem": rent(big) - costs(big) - pay,
-            "byt_hypo": -costs(big) - pay,
-            "byt_najem": rent(OWN) - costs(OWN),
-            "byt": -costs(OWN),
+            "byt_najem": rent(small) - costs(small),
         }
     )
     equity = pd.DataFrame(
         {
             "byt_hypo_najem": big * growth - debt,
-            "byt_hypo": big * growth - debt,
-            "byt_najem": OWN * growth,
-            "byt": OWN * growth,
+            "byt_najem": small * growth,
         }
     )
     return {
@@ -467,84 +404,86 @@ def flat_strategies(d: Data, sc: Scenario | None = None, gross_yield: float = GR
     }
 
 
-def lump_sum(d: Data, start: pd.Period = START_Q, end: pd.Period = END_Q) -> pd.DataFrame:
+def lump_sum(d: Data, sc: Scenario) -> pd.DataFrame:
     """Value of OWN invested once at the start, no mortgage, no further contributions."""
-    months = pd.period_range(mid_month(start), mid_month(end), freq="M")
+    months = pd.period_range(mid_month(sc.start), mid_month(sc.end), freq="M")
+    spx = d.spx["tr"] if sc.spx_dividends else d.spx["P"]
     s = pd.DataFrame(
         {
-            "sp500": (d.spx["tr"] * d.usd).reindex(months),
+            "sp500": (spx * d.usd).reindex(months),
             "zlato": (d.gold * d.usd).reindex(months),
-            "byt": flat_monthly(d.flats["cr"], months),
-            "inflace": d.hicp["TOTAL"].reindex(months),
             "sporici": savings_index(d.dep["term_1y"], months),
+            "byt": flat_monthly(d.flats[sc.region], months),
+            "inflace": d.hicp["TOTAL"].reindex(months),
             "sporici_bezny": savings_index(d.dep["overnight"], months),
             "sp500_usd": d.spx["tr"].reindex(months),
             "sp500_price": (d.spx["P"] * d.usd).reindex(months),
             "zlato_usd": d.gold.reindex(months),
             "usd": d.usd.reindex(months),
-            "praha": flat_monthly(d.flats["praha"], months),
-            "mimo": flat_monthly(d.flats["mimo"], months),
         }
     )
+    assert not s.isna().any().any(), "missing monthly prices"
     return OWN * s / s.iloc[0]
 
 
-def robustness_b(d: Data) -> pd.DataFrame:
-    """Final net result of the variant B flats under changed assumptions."""
-    variants = {
-        f"Základ (nájem {pct(GROSS_YIELD, digits=0)}, náklady {pct(OWNER_COST, digits=0)})": {},
-        "Hrubý nájem 4 % ceny": {"gross_yield": 0.04},
-        "Hrubý nájem 6 % ceny": {"gross_yield": 0.06},
-        "Náklady 1,5 % ceny": {"owner_cost": 0.015},
-        "Náklady 0,5 % ceny": {"owner_cost": 0.005},
-        "Byty jen Praha": {"sc": Scenario(region="praha")},
-        "Byty jen ČR bez Prahy": {"sc": Scenario(region="mimo")},
+def run(d: Data, sc: Scenario | None = None) -> dict:
+    """All strategies for OWN put in once at the start of the window: value paths and yearly return.
+
+    Return of the flats = IRR of −OWN, the monthly cash flows (top-up = further investment, surplus
+    = withdrawal) and the final equity; of the others = average yearly growth (their IRR).
+    """
+    sc = sc or Scenario()
+    fl = flat_strategies(d, sc)
+    lump = lump_sum(d, sc)
+    paths = pd.concat([fl["wealth"], lump[["sp500", "zlato", "sporici"]]], axis=1)[list(STRATEGIES)]
+    n = len(fl["months"]) - 1
+    irrs = {k: (lump[k].iloc[-1] / OWN) ** (12 / n) - 1 for k in ("sp500", "zlato", "sporici")}
+    for k in FLATS:
+        flows = np.concatenate([[-OWN], fl["cf"][k].values[1:]])
+        flows[-1] += fl["equity"][k].iloc[-1]
+        irrs[k] = irr(flows)
+    return {
+        "sc": sc,
+        "fl": fl,
+        "lump": lump,
+        "paths": paths,
+        "final": paths.iloc[-1],
+        "irr": pd.Series(irrs)[list(STRATEGIES)],
     }
-    rows = {name: flat_strategies(d, **kw)["wealth"].iloc[-1] for name, kw in variants.items()}
-    return pd.DataFrame(rows).T.rename(columns={k: v[0] for k, v in B_FLATS.items()})
+
+
+def robustness(d: Data) -> pd.DataFrame:
+    """Final value of OWN and yearly return (IRR) under one changed assumption at a time."""
+    sc0 = Scenario()
+    variants = {
+        f"Základ (nájem {pct(GROSS_YIELD)}, náklady {pct(OWNER_COST, digits=0)}, fixace 1–5 let)": sc0,
+        "Hrubý nájem 4 % ceny": replace(sc0, gross_yield=0.04),
+        "Hrubý nájem 6 % ceny": replace(sc0, gross_yield=0.06),
+        "Náklady vlastníka 0,5 % ceny": replace(sc0, owner_cost=0.005),
+        "Náklady vlastníka 1,5 % ceny": replace(sc0, owner_cost=0.015),
+        "Fixace 5–10 let na celých 10 let": replace(sc0, fixation="O", fix_months=120),
+        "Sazba z roku 2016 na celých 10 let": replace(sc0, fix_months=120),
+        "Hypotéka 70 % ceny": replace(sc0, ltv=0.7),
+        "Hypotéka 90 % ceny": replace(sc0, ltv=0.9),
+        "Náklady na koupi bytu 4 % ceny": replace(sc0, buy_cost=0.04),
+        "Okno 1Q 2016 → 1Q 2026": replace(sc0, start=pd.Period("2016Q1"), end=pd.Period("2026Q1")),
+        "Okno 2Q 2015 → 2Q 2025": replace(sc0, start=pd.Period("2015Q2"), end=pd.Period("2025Q2")),
+        "Byty jen Praha": replace(sc0, region="praha"),
+        "Byty jen ČR bez Prahy": replace(sc0, region="mimo"),
+        "S&P 500 bez dividend": replace(sc0, spx_dividends=False),
+    }
+    rows = {}
+    for name, sc in variants.items():
+        r = run(d, sc)
+        rows[name] = {
+            **{STRATEGIES[k][0]: r["final"][k] for k in STRATEGIES},
+            **{f"IRR {STRATEGIES[k][0]}": r["irr"][k] for k in (*FLATS, "sp500")},
+        }
+    return pd.DataFrame(rows).T
 
 
 def max_drawdown(s: pd.Series) -> float:
     return float((s / s.cummax() - 1).min())
-
-
-def robustness(d: Data, base: dict) -> pd.DataFrame:
-    sc0 = base["sc"]
-    rate_o = d.mir.loc["2016-04":"2016-06", "O"].mean()
-    variants = {
-        "Základ (fixace 1–5 let, refixace 2021)": sc0,
-        f"Fixace 5–10 let, {pct(rate_o / 100, digits=2)} na celých 10 let": replace(
-            sc0, fixation="O", fix_months=120
-        ),
-        "Sazba z roku 2016 na celých 10 let": replace(sc0, fix_months=120),
-        "Okno 1Q 2016 → 1Q 2026": replace(sc0, start=pd.Period("2016Q1"), end=pd.Period("2026Q1")),
-        "Okno 2Q 2015 → 2Q 2025": replace(sc0, start=pd.Period("2015Q2"), end=pd.Period("2025Q2")),
-        "S&P 500 bez dividend": replace(sc0, spx_dividends=False),
-        "Náklady na koupi bytu 4 % ceny": replace(sc0, buy_cost=0.04),
-        "Hypotéka 70 % ceny": replace(sc0, ltv=0.7),
-        "Hypotéka 90 % ceny": replace(sc0, ltv=0.9),
-        "Byty jen Praha": replace(sc0, region="praha"),
-        "Byty jen ČR bez Prahy": replace(sc0, region="mimo"),
-        "S čistým nájmem 2 % ročně": replace(sc0, rent_yield=0.02),
-        "S čistým nájmem 3 % ročně": replace(sc0, rent_yield=0.03),
-        "S čistým nájmem 4 % ročně": replace(sc0, rent_yield=0.04),
-    }
-    rows = []
-    for name, sc in variants.items():
-        r = base if sc == sc0 else simulate(d, sc)
-        f = r["final"]
-        rows.append(
-            {
-                "varianta": name,
-                "vloženo": r["total_in"],
-                "splátka": r["sched"]["payment"].iloc[0],
-                **{f"{k}": f[k] for k in STRATEGIES},
-                "irr_hypo": r["irr"]["byt_hypo"],
-                "irr_sp500": r["irr"]["sp500"],
-                "hypo/sp500": (f["byt_hypo"] - r["total_in"]) / (f["sp500"] - r["total_in"]),
-            }
-        )
-    return pd.DataFrame(rows).set_index("varianta")
 
 
 def inflation_table(d: Data) -> pd.DataFrame:
@@ -648,51 +587,22 @@ def _line_chart(ax, months: pd.PeriodIndex, series: list[tuple[pd.Series, str, s
                 linespacing=1.3)  # fmt: skip
 
 
-def chart_a_wealth(base: dict, path: Path) -> dict:
-    p, inv, f = base["paths"], base["invested"], base["final"]
-    gains = f[A_KEYS] - base["total_in"]
-    best_other = gains.drop("byt_hypo").idxmax()
-    ratio = gains["byt_hypo"] / gains[best_other]
-    sched = base["sched"]
-    r1, r2 = sched["rate"].iloc[0], sched["rate"].iloc[-1]
-    series = [(p[k], f"{STRATEGIES[k][0]}\n{mil(f[k])}", STRATEGIES[k][1], "-") for k in A_KEYS]
-    series.append((inv, f"Vloženo celkem\n{mil(base['total_in'])}", MUTED, "--"))
-    social_image(
-        path,
-        (
-            "Byt na hypotéku vydělal za 10 let",
-            f"{times(ratio).replace('×', 'krát')} víc než akcie i zlato",
-        ),
-        [
-            f"Hodnota investice v korunách, {qlabel(START_Q)} → {qlabel(END_Q)}. Všechny čtyři strategie",
-            f"dostaly stejné peníze: na začátku 1 mil. Kč, pak každý měsíc {kc(sched['payment'].iloc[0])} (splátka hypotéky).",
-            "Byt s hypotékou: 1 mil. Kč jako 20% akontace, 80 % úvěr na 30 let, cena podle průměru ČR.",
-            f"Sazba {pct(r1, digits=2)} (průměr nových hypoték, ČNB), od roku 2021 refixace na {pct(r2, digits=2)}.",
-        ],
-        lambda ax: _line_chart(ax, base["months"], series, gap=1.05e6),
-    )
-    return {"ratio": ratio, "best_other": best_other, "gains": gains, "r1": r1, "r2": r2}
-
-
-def chart_b_lump(lump: pd.DataFrame, fl: dict, path: Path) -> dict:
-    """1 mil. Kč put in once: flats (rented / empty, with / without mortgage), S&P, gold, savings."""
-    w = fl["wealth"]
+def chart_b_lump(base: dict, path: Path) -> dict:
+    """1 mil. Kč put in once: rented flats (with / without mortgage), S&P, gold, savings."""
+    fl, lump, paths = base["fl"], base["lump"], base["paths"]
     end = lump.iloc[-1] / OWN
     sched = fl["sched"]
-    vals = {**{k: w[k] for k in B_FLATS}, **{k: lump[k] for k in ("sp500", "zlato", "sporici")}}
-    styles = {**B_FLATS, **{k: (*STRATEGIES[k], "-") for k in ("sp500", "zlato", "sporici")}}
-    order = sorted(vals, key=lambda k: -vals[k].iloc[-1])
-    series = [(vals[k], f"{styles[k][0]}\n{mil(vals[k].iloc[-1])}", styles[k][1], styles[k][2])
+    order = list(base["final"].sort_values(ascending=False).index)
+    series = [(paths[k], f"{STRATEGIES[k][0]}\n{mil(paths[k].iloc[-1])}", STRATEGIES[k][1], "-")
               for k in order]  # fmt: skip
     series.append(
         (lump["inflace"], f"Inflace (HICP)\n{mil(lump['inflace'].iloc[-1])}", MUTED, "--")
     )
-    top = vals[order[0]].iloc[-1]
+    top = paths[order[0]].iloc[-1]
     # Claims in the subtitle and post text.
     assert order[0] == "byt_hypo_najem" and fl["cf"]["byt_hypo_najem"].sum() > 0
-    assert w["byt_hypo"].iloc[-1] > lump["sp500"].iloc[-1]
-    assert min(v.iloc[-1] for k, v in vals.items() if k != "sporici") > lump["inflace"].iloc[-1]
-    assert lump["sporici"].iloc[-1] < lump["inflace"].iloc[-1]
+    assert base["final"].drop("sporici").min() > lump["inflace"].iloc[-1]
+    assert base["final"]["sporici"] < lump["inflace"].iloc[-1]
     social_image(
         path,
         (
@@ -703,54 +613,52 @@ def chart_b_lump(lump: pd.DataFrame, fl: dict, path: Path) -> dict:
             f"Hodnota 1 mil. Kč vloženého jednorázově v {qlabel(START_Q)}. Byt bez hypotéky za 1 mil. Kč,",
             f"s hypotékou za {mil(fl['big'], 0)} (80% úvěr, sazba {pct(sched['rate'].iloc[0], digits=1)}, od 2021 {pct(sched['rate'].iloc[-1], digits=1)}).",
             "U bytů: cena − dluh + nájem − náklady − splátky. Co bylo nutné doplácet, je odečteno (graf B2).",
-            f"Nájem {pct(GROSS_YIELD, digits=0)} ceny ročně, 1 měsíc prázdný, náklady {pct(OWNER_COST, digits=0)} ceny. Spořicí účet: sazby ČNB",
+            f"Nájem {pct(GROSS_YIELD)} ceny ročně, 1 měsíc prázdný, náklady {pct(OWNER_COST, digits=0)} ceny. Spořicí účet: sazby ČNB",
             f"vkladů do 1 roku, po dani. Šedá čárkovaná: inflace, {pct(end['inflace'] ** 0.1 - 1)} ročně (2022–23 přes 10 %).",
         ],
         lambda ax: _line_chart(ax, fl["months"], series, gap=0.75e6, fontsize=11),
         axes_rect=(0.1, 0.15, 0.56, 0.6),
         source=SOURCE_B,
     )
-    trio = end[["sp500", "zlato", "byt"]]  # bought for cash, no rent or costs
-    return {
-        "end": end,
-        "wealth_end": w.iloc[-1],
-        "order": order,
-        "lo": trio.min(),
-        "hi": trio.max(),
-    }
+    return {"end": end, "order": order}
 
 
 def _kc_axis(v, _) -> str:
     return f"{v / 1000:+.0f} tis.".replace("-", "−") if v else "0"
 
 
-def chart_b2_cashflow(fl: dict, path: Path) -> dict:
+def chart_b2_cashflow(fb: dict, path: Path) -> dict:
     """Monthly cash flow of the variant B flats: rent − costs − installment."""
-    cf = fl["cf"].iloc[1:]
-    months = fl["months"][1:]
+    cf = fb["cf"].iloc[1:]
+    months = fb["months"][1:]
     tot = cf.sum()
     series = [
-        (cf[k], f"{B_FLATS[k][0]}\n{kc(cf[k].iloc[-1])} měsíčně, celkem {mil(tot[k])}",
-         B_FLATS[k][1], B_FLATS[k][2])
-        for k in B_FLATS
+        (cf[k], f"{STRATEGIES[k][0]}\n{kc(cf[k].iloc[-1])} měsíčně, celkem {mil(tot[k])}",
+         STRATEGIES[k][1], "-")
+        for k in FLATS
     ]  # fmt: skip
     neg = cf["byt_hypo_najem"] < 0
     last_neg = cf.index[neg][-1] if neg.any() else None
+    assert last_neg is not None and not neg.loc[last_neg + 1 :].any(), (
+        "title: negative, then positive"
+    )
+    years_neg = round((last_neg - cf.index[0]).n / 12)
     social_image(
         path,
         (
-            "Pronajatý byt si hypotéku zaplatil sám,",
-            f"prázdný stál {kc(-cf['byt_hypo'].mean())} měsíčně",
+            f"Pronajatý byt na hypotéku {years_neg} let doplácel,",
+            f"dnes vydělává {kc(cf['byt_hypo_najem'].iloc[-1])} měsíčně",
         ),
         [
-            f"Měsíční cashflow bytů z varianty B, {qlabel(START_Q)} → {qlabel(END_Q)}: nájem − náklady − splátka.",
-            f"Nájem {pct(GROSS_YIELD, digits=0)} ceny z roku 2016 ročně (1 měsíc v roce prázdný), roste s nájemným v HICP.",
+            f"Měsíční cashflow pronajatých bytů z varianty B, {qlabel(START_Q)} → {qlabel(END_Q)}:",
+            f"nájem − náklady − splátka hypotéky (byt za {mil(fb['big'], 0)}, 80% úvěr, splátka {kc(fb['sched']['payment'].iloc[0])}).",
+            f"Nájem {pct(GROSS_YIELD)} ceny z roku 2016 ročně (1 měsíc v roce prázdný), roste s nájemným v HICP.",
             f"Náklady (fond oprav, pojištění, daň, opravy) {pct(OWNER_COST, digits=0)} ceny ročně, rostou s inflací.",
             "Pronajatý byt s hypotékou doplácel"
             + (f" do {last_neg.strftime('%m/%Y')}, pak byl v plusu." if last_neg else " nikdy.")
-            + f" Prázdný s hypotékou spolkl {mil(-tot['byt_hypo'])}.",
+            + f" Za 10 let celkem {mil(tot['byt_hypo_najem'])}.",
         ],
-        lambda ax: _line_chart(ax, months, series, gap=4200, yfmt=_kc_axis, fontsize=11),
+        lambda ax: _line_chart(ax, months, series, gap=900, yfmt=_kc_axis, fontsize=11),
         axes_rect=(0.12, 0.17, 0.5, 0.58),
         source=SOURCE_B,
     )
@@ -761,20 +669,18 @@ def chart_c_regions(regions: dict, path: Path) -> dict:
     rows = []
     for reg, label in (("mimo", "mimo Prahu"), ("cr", "průměr ČR"), ("praha", "Praha")):
         f = regions[reg]["final"]
-        rows.append((f"Byt s hypotékou – {label}", f["byt_hypo"], STRATEGIES["byt_hypo"][1]))
-        rows.append((f"Byt bez hypotéky – {label}", f["byt"], STRATEGIES["byt"][1]))
+        for key in FLATS:
+            rows.append((f"{STRATEGIES[key][0]} – {label}", f[key], STRATEGIES[key][1]))
     f = regions["cr"]["final"]
-    rows += [("Zlato", f["zlato"], STRATEGIES["zlato"][1]),
-             ("Akcie S&P 500", f["sp500"], STRATEGIES["sp500"][1])]  # fmt: skip
+    rows += [(STRATEGIES[k_][0], f[k_], STRATEGIES[k_][1]) for k_ in ("zlato", "sp500")]
     df = pd.DataFrame(rows, columns=["label", "value", "color"]).sort_values("value")
-    total_in = regions["cr"]["total_in"]
 
     def draw(ax) -> None:
         y = np.arange(len(df))
         ax.barh(y, df["value"], color=df["color"], height=0.68)
         ax.set_yticks(y, df["label"], fontsize=12)
-        ax.axvline(total_in, color=MUTED, lw=1.4, ls="--")
-        ax.text(total_in, len(df) - 0.35, f" vloženo {mil(total_in)}", color=INK2, fontsize=10.5,
+        ax.axvline(OWN, color=MUTED, lw=1.4, ls="--")
+        ax.text(OWN, len(df) - 0.35, f" vloženo {mil(OWN)}", color=INK2, fontsize=10.5,
                 va="bottom")  # fmt: skip
         for i, v in enumerate(df["value"]):
             ax.text(v + df["value"].max() * 0.01, i, mil(v), va="center", fontsize=11, color=INK2)
@@ -783,24 +689,28 @@ def chart_c_regions(regions: dict, path: Path) -> dict:
         ax.set_xlim(0, df["value"].max() * 1.17)
         ax.set_ylim(-0.6, len(df) - 0.1)
 
-    m, p = regions["mimo"]["final"], regions["praha"]["final"]
+    m, p, cr = (regions[r]["final"]["byt_hypo_najem"] for r in ("mimo", "praha", "cr"))
+    assert m > cr > p, "title claims regions outside Prague did best with a mortgage"
+    growth = {r: regions[r]["fl"]["equity"]["byt_najem"].iloc[-1] / OWN for r in regions}
     social_image(
         path,
         ("Na hypotéku vydělaly nejvíc", "byty mimo Prahu"),
         [
-            f"Hodnota v {qlabel(END_Q)}, stejné vklady od {qlabel(START_Q)}: 1 mil. Kč na začátku",
-            f"a {kc(regions['cr']['sched']['payment'].iloc[0])} měsíčně, celkem {mil(regions['cr']['total_in'])}.",
-            f"Byty mimo Prahu zdražily {times(regions['mimo']['prices']['byt'].iloc[-1] / regions['mimo']['prices']['byt'].iloc[0])}, pražské {times(regions['praha']['prices']['byt'].iloc[-1] / regions['praha']['prices']['byt'].iloc[0])}.",
-            f"Hypotéka ten rozdíl znásobila: {mil(m['byt_hypo'])} proti {mil(p['byt_hypo'])}.",
+            f"Hodnota 1 mil. Kč vloženého jednorázově v {qlabel(START_Q)}, stav v {qlabel(END_Q)}.",
+            "Byty pronajaté; u bytů cena − dluh + nájem − náklady − splátky. Nájem jako % ceny",
+            f"všude stejný ({pct(GROSS_YIELD)}). Byty mimo Prahu zdražily {times(growth['mimo'])}, pražské {times(growth['praha'])}.",
+            f"Hypotéka ten rozdíl znásobila: {mil(m)} proti {mil(p)}.",
         ],
         draw,
-        axes_rect=(0.36, 0.17, 0.56, 0.6),
+        axes_rect=(0.42, 0.17, 0.5, 0.6),
+        source=SOURCE_B,
     )
     return {"df": df}
 
 
-def chart_d_irr(base: dict, lump: pd.DataFrame, path: Path) -> dict:
+def chart_d_irr(base: dict, path: Path) -> dict:
     r = base["irr"].sort_values()
+    lump = base["lump"]
     infl = (lump["inflace"].iloc[-1] / lump["inflace"].iloc[0]) ** 0.1 - 1
     assert r["sporici"] < infl < r.drop("sporici").min(), (
         "subtitle claims only savings lost to inflation"
@@ -809,7 +719,7 @@ def chart_d_irr(base: dict, lump: pd.DataFrame, path: Path) -> dict:
     def draw(ax) -> None:
         y = np.arange(len(r))
         ax.barh(y, r.values * 100, color=[STRATEGIES[k][1] for k in r.index], height=0.6)
-        ax.set_yticks(y, [STRATEGIES[k][0] for k in r.index], fontsize=13)
+        ax.set_yticks(y, [D_LABELS.get(k, STRATEGIES[k][0]) for k in r.index], fontsize=13)
         for i, v in enumerate(r.values):
             ax.text(v * 100 + 0.3, i, pct(v), va="center", fontsize=13, color=INK, weight="bold")
         ax.axvline(infl * 100, color=MUTED, lw=1.4, ls="--")
@@ -823,18 +733,20 @@ def chart_d_irr(base: dict, lump: pd.DataFrame, path: Path) -> dict:
     social_image(
         path,
         (
-            f"Byt na hypotéku vynášel {pct(r['byt_hypo'], digits=0)} ročně,",
+            f"Pronajatý byt na hypotéku vynášel {pct(r['byt_hypo_najem'], digits=0)} ročně,",
             f"akcie i zlato kolem {pct((r['sp500'] + r['zlato']) / 2, digits=0)}",
         ),
         [
-            f"Průměrné roční zhodnocení vlastních peněz, {qlabel(START_Q)} → {qlabel(END_Q)}, v korunách.",
-            f"Stejné vklady u všech strategií: 1 mil. Kč na začátku + {kc(base['sched']['payment'].iloc[0])} měsíčně (splátka hypotéky).",
-            "Výnos počítaný jako vnitřní výnosové procento (IRR) z těchto vkladů a konečné hodnoty.",
-            "U bytu bez nájmu a nákladů, u akcií s reinvestovanými dividendami. Spořicí účet: sazby ČNB",
-            "nových vkladů do 1 roku, po 15% dani. Spořák jako jediný prohrál s inflací (2022–23 přes 10 %).",
+            f"Průměrné roční zhodnocení 1 mil. Kč vloženého jednorázově, {qlabel(START_Q)} → {qlabel(END_Q)}.",
+            "U bytů včetně nájmu, nákladů a splátek: doplatky z vlastní kapsy jako další vklad, přebytky",
+            "jako výběr (vnitřní výnosové procento, IRR). U ostatních průměrný roční růst hodnoty.",
+            f"Nájem {pct(GROSS_YIELD)} ceny ročně (1 měsíc prázdný), náklady {pct(OWNER_COST, digits=0)} ceny. Akcie s dividendami.",
+            "Spořicí účet: sazby ČNB nových vkladů do 1 roku, po 15% dani. Spořák jako jediný",
+            "prohrál s inflací (ta byla tak vysoko hlavně kvůli letům 2022–23 s inflací přes 10 %).",
         ],
         draw,
-        axes_rect=(0.3, 0.2, 0.62, 0.55),
+        axes_rect=(0.3, 0.18, 0.62, 0.54),
+        source=SOURCE_B,
     )
     return {"irr": r, "infl": infl}
 
@@ -887,61 +799,40 @@ def chart_rates(d: Data, path: Path) -> None:
 # --------------------------------------------------------------------------------------------
 
 
-def post_texts(base: dict, lump: pd.DataFrame, regions: dict, rob: pd.DataFrame, k: dict,
-               fb: dict, infl: pd.DataFrame) -> dict:  # fmt: skip
-    f, total_in = base["final"], base["total_in"]
-    pay = base["sched"]["payment"].iloc[0]
-    irr_ = k["D"]["irr"]
-    fl = base["prices"]["byt"]
-    flat_x = fl.iloc[-1] / fl.iloc[0]
-    rent3 = rob.loc["S čistým nájmem 3 % ročně"]
-    fix10 = rob.iloc[1]
-    m, p = regions["mimo"], regions["praha"]
-    w = k["B"]["wealth_end"]
+def post_texts(base: dict, regions: dict, rob: pd.DataFrame, k: dict, infl: pd.DataFrame) -> dict:
+    fb, lump, w, irr_ = base["fl"], base["lump"], base["final"], base["irr"]
     cf, tot = k["B2"]["cf"], k["B2"]["tot"]
+    m, p = regions["mimo"], regions["praha"]
     infl_y = (lump["inflace"].iloc[-1] / OWN) ** 0.1 - 1
     hicp = infl["HICP (Eurostat/ČSÚ)"]
     calm = hicp.drop(["5/2021 → 5/2022", "5/2022 → 5/2023"])
     calm_y = (1 + calm).prod() ** (1 / len(calm)) - 1
-    sav_y = (lump["sporici"].iloc[-1] / OWN) ** 0.1 - 1
+    irr_hypo = rob["IRR Pronajatý byt s hypotékou"]
     return {
-        "A": (
-            f"Kdo v roce 2016 koupil byt na hypotéku, má dnes víc než ten, kdo stejné peníze dal do amerických akcií nebo do zlata. A to výrazně.\n\n"
-            f"Spočítali jsme to férově: každá strategie dostala na začátku 1 mil. Kč a pak každý měsíc {kc(pay)} (přesně splátku hypotéky), celkem {mil(total_in)}. "
-            f"Za 10 let z toho bylo: byt s 80% hypotékou {mil(f['byt_hypo'])}, zlato {mil(f['zlato'])}, akcie S&P 500 {mil(f['sp500'])}, byt bez hypotéky {mil(f['byt'])}.\n\n"
-            f"Proč? Průměrný byt v ČR zdražil {times(flat_x)} a hypotéka s úrokem kolem {pct(k['A']['r1'], digits=1)} ten růst znásobila — vydělávali jste na ceně celého bytu, ne jen na svém milionu. A to ještě nepočítáme nájem.\n\n"
-            "Jenže páka funguje oběma směry. Těchto 10 let bylo pro byty výjimečných: levné úvěry na začátku a ceny skoro bez poklesu. S dnešními sazbami kolem 5 % a cenami na rekordu je výchozí bod úplně jiný."
-        ),
         "B": (
-            f"Milion korun v roce 2016. Kam s ním? Dnes by z něj bylo: pronajatý byt s 80% hypotékou {mil(w['byt_hypo_najem'])}, prázdný byt s hypotékou {mil(w['byt_hypo'])}, akcie S&P 500 {mil(lump['sp500'].iloc[-1])}, pronajatý byt bez hypotéky {mil(w['byt_najem'])}, zlato {mil(lump['zlato'].iloc[-1])}, prázdný byt bez hypotéky {mil(w['byt'])} a spořicí účet {mil(lump['sporici'].iloc[-1])}.\n\n"
-            f"U bytů je všechno započtené: cena bytu, zbývající dluh, nájem, náklady i splátky. Kdo měl byt na hypotéku prázdný, musel za 10 let doplatit z vlastní kapsy {mil(-tot['byt_hypo'])} — a i tak vyšel lépe než akcie. Pronajatý byt si splátky pokryl nájmem.\n\n"
-            f"Spořicí účet jako jediný prohrál s inflací: vynášel po dani {pct(sav_y)} ročně, ceny rostly o {pct(infl_y)} ročně. Na stejný nákup jako za milion v roce 2016 dnes potřebujete {mil(lump['inflace'].iloc[-1])}.\n\n"
+            f"Milion korun v roce 2016. Kam s ním? Dnes by z něj bylo: pronajatý byt s 80% hypotékou {mil(w['byt_hypo_najem'])}, akcie S&P 500 {mil(w['sp500'])}, pronajatý byt bez hypotéky {mil(w['byt_najem'])}, zlato {mil(w['zlato'])} a spořicí účet {mil(w['sporici'])}.\n\n"
+            f"U bytů je všechno započtené: cena bytu, zbývající dluh, nájem, náklady i splátky. Nájem z bytu na hypotéku za {mil(fb['big'], 0)} zpočátku na splátku a náklady úplně nestačil (doplácelo se do {k['B2']['last_neg'].strftime('%m/%Y')}), za 10 let ale po zaplacení splátek a nákladů zbylo {mil(tot['byt_hypo_najem'])}.\n\n"
+            f"Spořicí účet jako jediný prohrál s inflací: vynášel po dani {pct(irr_['sporici'])} ročně, ceny rostly o {pct(infl_y)} ročně. Na stejný nákup jako za milion v roce 2016 dnes potřebujete {mil(lump['inflace'].iloc[-1])}.\n\n"
             "Bez hypotéky skončily byt, akcie i zlato podobně. Rozdíl udělala levná hypotéka — a ta dnes stojí dvakrát víc."
         ),
         "B2": (
             f"Byt na hypotéku vypadá v grafech skvěle. Jak ale vypadala peněženka měsíc po měsíci?\n\n"
-            f"Prázdný byt s 80% hypotékou (cena {mil(fb['big'], 0)}) stál majitele v průměru {kc(-cf['byt_hypo'].mean())} měsíčně: splátku a náklady na fond oprav, pojištění, daň a opravy. Za 10 let {mil(-tot['byt_hypo'])}.\n\n"
-            f"Pronajatý byt na tom byl úplně jinak. Nájem kolem {pct(GROSS_YIELD, digits=0)} ceny ročně na začátku zhruba pokryl splátku i náklady"
-            + (
-                f", od {k['B2']['last_neg'].strftime('%m/%Y')} byl každý měsíc v plusu"
-                if k["B2"]["last_neg"] is not None
-                else ""
-            )
-            + f" a dnes vydělává {kc(cf['byt_hypo_najem'].iloc[-1])} měsíčně. Celkem za 10 let {mil(tot['byt_hypo_najem'])}.\n\n"
+            f"Pronajatý byt s 80% hypotékou (cena {mil(fb['big'], 0)}): nájem po odečtení prázdného měsíce {kc(fb['rent_big'].iloc[1])} měsíčně, splátka {kc(fb['sched']['payment'].iloc[0])}, náklady (fond oprav, pojištění, daň, opravy) {kc(fb['costs_big'].iloc[1])}. Na začátku tedy cashflow {kc(cf['byt_hypo_najem'].iloc[0])} měsíčně"
+            f", od {(k['B2']['last_neg'] + 1).strftime('%m/%Y')} každý měsíc v plusu. Nájem rostl, splátka ne, a dnes byt vydělává {kc(cf['byt_hypo_najem'].iloc[-1])} měsíčně. Za 10 let celkem {mil(tot['byt_hypo_najem'])}.\n\n"
+            f"Pronajatý byt bez hypotéky (za 1 mil. Kč) byl v plusu od začátku, dnes {kc(cf['byt_najem'].iloc[-1])} měsíčně, za 10 let {mil(tot['byt_najem'])}.\n\n"
             "Pozor na dnešek: s hypotékou kolem 5 % a nižším výnosem z nájmu by stejný byt začínal s cashflow hluboko v minusu. Než koupíte, spočítejte si, kolik budete měsíčně doplácet."
         ),
         "C": (
-            f"Byty mimo Prahu zdražily za 10 let {times(m['prices']['byt'].iloc[-1] / m['prices']['byt'].iloc[0])}, pražské „jen“ {times(p['prices']['byt'].iloc[-1] / p['prices']['byt'].iloc[0])}.\n\n"
-            f"S 80% hypotékou se ten rozdíl zvětší: ze stejných vkladů (1 mil. Kč a {kc(pay)} měsíčně) by byt mimo Prahu dnes měl čistou hodnotu {mil(m['final']['byt_hypo'])}, pražský {mil(p['final']['byt_hypo'])}. Akcie S&P 500 {mil(f['sp500'])}.\n\n"
-            "Regiony vyšly lépe, protože začínaly z nízkých cen. Za ten růst ale mohly i levné úvěry a nedostatek bytů — dnes jsou ceny i mimo Prahu jinde a výnos z nájmu nižší.\n\n"
-            "Jako pronajímatel se při další koupi ptejte, jestli bude cena i nájem v daném městě dál růst. Minulých 10 let to platilo skoro všude, to ale není zákon."
+            f"Byty mimo Prahu zdražily za 10 let {times(m['fl']['equity']['byt_najem'].iloc[-1] / OWN)}, pražské „jen“ {times(p['fl']['equity']['byt_najem'].iloc[-1] / OWN)}.\n\n"
+            f"S 80% hypotékou se ten rozdíl zvětší. Kdo v roce 2016 dal milion jako akontaci na pronajatý byt mimo Prahu, má dnes po odečtení dluhu a se započtením nájmu, nákladů a splátek {mil(m['final']['byt_hypo_najem'])}. V Praze {mil(p['final']['byt_hypo_najem'])}. Stejný milion v akciích S&P 500 je dnes {mil(w['sp500'])}.\n\n"
+            "Nájem přitom počítáme všude stejně vysoký vzhledem k ceně bytu. Ve skutečnosti vynáší pražský byt z nájmu méně, takže rozdíl by byl spíš ještě větší.\n\n"
+            "Regiony vyšly lépe, protože začínaly z nízkých cen. Za ten růst ale mohly i levné úvěry a nedostatek bytů — dnes jsou ceny i mimo Prahu jinde a výnos z nájmu nižší. Jako pronajímatel se při další koupi ptejte, jestli bude cena i nájem v daném městě dál růst."
         ),
         "D": (
-            f"Byt koupený v roce 2016 s 80% hypotékou vynášel vlastním penězům v průměru {pct(irr_['byt_hypo'])} ročně. Akcie S&P 500 {pct(irr_['sp500'])}, zlato {pct(irr_['zlato'])}, byt bez hypotéky {pct(irr_['byt'])}, spořicí účet po dani {pct(irr_['sporici'])}.\n\n"
+            f"Milion vložený v roce 2016 jako akontace na pronajatý byt s 80% hypotékou vynášel v průměru {pct(irr_['byt_hypo_najem'])} ročně. Akcie S&P 500 {pct(irr_['sp500'])}, zlato {pct(irr_['zlato'])}, pronajatý byt bez hypotéky {pct(irr_['byt_najem'])}, spořicí účet po dani {pct(irr_['sporici'])}.\n\n"
             f"Inflace byla {pct(k['D']['infl'])} ročně. Vysoké číslo dělají hlavně roky 2022 a 2023 (od května do května {pct(hicp['5/2021 → 5/2022'])} a {pct(hicp['5/2022 → 5/2023'])}); bez nich by to bylo {pct(calm_y)} ročně. Spořicí účet tak jako jediný reálně ztrácel.\n\n"
-            f"U bytu přitom nepočítáme nájem. Kdyby čistý nájem (po nákladech a neobsazenosti) dělal 3 % ceny ročně, byl by výnos bytu na hypotéku {pct(rent3['irr_hypo'])} ročně.\n\n"
-            f"Výsledek nestojí na detailech: s desetiletou fixací by to bylo {pct(fix10['irr_hypo'])}, s 4% náklady na koupi bytu {pct(rob.loc['Náklady na koupi bytu 4 % ceny', 'irr_hypo'])}.\n\n"
-            "Je to ale ohlédnutí za výjimečnou dekádou. Stejný výpočet pro příštích 10 let začíná s dvojnásobnou sazbou a o třetinu nižším výnosem z nájmu. Páka zvětšuje zisky i ztráty."
+            f"U bytů počítáme nájem {pct(GROSS_YIELD)} ceny ročně (jeden měsíc v roce prázdný), náklady vlastníka {pct(OWNER_COST, digits=0)} ceny ročně a doplatky na splátky jako další vklad. Výsledek na předpokladech moc nestojí: při nájmu 4 % by byt na hypotéku vynášel {pct(irr_hypo['Hrubý nájem 4 % ceny'])}, při 6 % {pct(irr_hypo['Hrubý nájem 6 % ceny'])}, s desetiletou fixací {pct(irr_hypo['Fixace 5–10 let na celých 10 let'])}.\n\n"
+            "Je to ale ohlédnutí za výjimečnou dekádou. Stejný výpočet pro příštích 10 let začíná s dvojnásobnou sazbou a nižším výnosem z nájmu. Páka zvětšuje zisky i ztráty."
         ),
     }
 
@@ -970,30 +861,22 @@ def _table(df: pd.DataFrame, fmt: dict[str, Callable]) -> str:
 
 
 def write_report(out: Path, ctx: dict) -> None:
-    d, base, lump, regions, rob, posts, k, imgs, raw, chk, fb, rob_b, infl = (
-        ctx[x] for x in ("d", "base", "lump", "regions", "rob", "posts", "k", "imgs", "raw", "chk",
-                         "fl", "rob_b", "infl")
+    d, base, regions, rob, posts, k, imgs, raw, chk, infl, mdd = (
+        ctx[x] for x in ("d", "base", "regions", "rob", "posts", "k", "imgs", "raw", "chk", "infl",
+                         "mdd")
     )  # fmt: skip
-    f, total_in, sched = base["final"], base["total_in"], base["sched"]
-    pay0, pay1 = sched["payment"].iloc[0], sched["payment"].iloc[-1]
-    interest = sched["interest"].sum()
-    price0 = base["price0"]
-    fl = base["prices"]["byt"]
-    flat_end_value = price0 * fl.iloc[-1] / fl.iloc[0]
-    debt_end = sched["balance"].iloc[-1]
-    mdd = ctx["mdd"]
+    fb, lump, f = base["fl"], base["lump"], base["final"]
+    sched = fb["sched"]
+    big = fb["big"]
+    growth = fb["equity"]["byt_najem"].iloc[-1] / OWN
     esc = html.escape
     names = {k_: v[0] for k_, v in STRATEGIES.items()}
+    trio = f[["sp500", "zlato", "byt_najem"]] / OWN
 
-    yearly = base["paths"].copy()
-    yearly["vloženo"] = base["invested"]
-    yearly = yearly[yearly.index.month == base["months"][0].month]
+    yearly = base["paths"].assign(inflace=lump["inflace"])
+    yearly = yearly[yearly.index.month == fb["months"][0].month]
     yearly.index = yearly.index.year
-    yearly = yearly.rename(columns=names)
-
-    rob_view = rob.rename(columns={**names, "irr_hypo": "IRR byt s hyp.", "irr_sp500": "IRR S&P 500",
-                                   "hypo/sp500": "zisk hyp. / zisk S&P"})  # fmt: skip
-    m_fmt = {c: mil for c in ["vloženo", *names.values()]}
+    yearly = yearly.rename(columns={**names, "inflace": "Inflace (HICP)"})
 
     sources = [
         ("ČSÚ — Indexy realizovaných cen starších bytů (014007-26), čtvrtletně, průměr 2010 = 100",
@@ -1025,59 +908,44 @@ def write_report(out: Path, ctx: dict) -> None:
             f"{df.tail(4).round(3).to_html(border=0, classes='t')}"
         )
 
-    body = f"""
-<h1>10 let investování: S&amp;P 500, zlato a byt (s hypotékou i bez)</h1>
-<p class="lead">Hlavní závěr: <b>byt koupený v {qlabel(START_Q)} s 80% hypotékou vydělal za 10 let
-{times(k["A"]["ratio"])} víc než akcie S&amp;P 500</b> ze stejných vkladů. Z {mil(total_in)} vložených
-(1 mil. Kč + {kc(pay0)} měsíčně) by dnes bylo {mil(f["byt_hypo"])} v bytě s hypotékou, {mil(f["sp500"])} v akciích,
-{mil(f["zlato"])} ve zlatě a {mil(f["byt"])} v bytě bez hypotéky. Bez páky by byt, zlato i akcie skončily
-podobně ({times(k["B"]["lo"])}–{times(k["B"]["hi"])} za 10 let). Rozhodla páka levné hypotéky.</p>
+    rob_fmt = {c: (pct if c.startswith("IRR") else mil) for c in rob.columns}
+    m, p = regions["mimo"], regions["praha"]
 
-<p class="note">Proč 2Q 2016 → 2Q 2026: ČSÚ zveřejňuje ceny bytů čtvrtletně, poslední je 2. čtvrtletí 2026
-(vydáno 14. 9. 2026). Měsíční řady (akcie, zlato, kurz, sazby) bereme v prostředním měsíci čtvrtletí,
-tj. květen 2016 → květen 2026 (121 měsíců, 120 splátek).</p>
+    body = f"""
+<h1>10 let investování: milion v bytě, akciích, zlatě nebo na spořicím účtu</h1>
+<p class="lead">Hlavní závěr: <b>1 mil. Kč vložený v {qlabel(START_Q)} jako akontace na pronajatý byt s 80% hypotékou
+je dnes {mil(f["byt_hypo_najem"])}</b> (po odečtení dluhu, včetně nájmu, nákladů a splátek). Stejný milion v akciích S&amp;P 500
+je {mil(f["sp500"])}, v pronajatém bytě bez hypotéky {mil(f["byt_najem"])}, ve zlatě {mil(f["zlato"])} a na spořicím účtu
+{mil(f["sporici"])}. Bez páky skončily byt, akcie i zlato podobně ({times(trio.min())}–{times(trio.max())} za 10 let).
+Rozhodla páka levné hypotéky. Spořicí účet jako jediný prohrál s inflací.</p>
+
+<p class="note">Všechny varianty počítají s jednorázovým vkladem 1 mil. Kč v květnu 2016, bez dalších vkladů. U bytu s hypotékou
+se doplatky z vlastní kapsy (když nájem nepokryl splátku a náklady) odečítají od výsledku (B, C), resp. počítají jako další vklad (D).
+Proč 2Q 2016 → 2Q 2026: ČSÚ zveřejňuje ceny bytů čtvrtletně, poslední je 2. čtvrtletí 2026 (vydáno 14. 9. 2026).
+Měsíční řady (akcie, zlato, kurz, sazby) bereme v prostředním měsíci čtvrtletí, tj. květen 2016 → květen 2026 (121 měsíců, 120 splátek).</p>
 
 <h2>Hlavní obrázek</h2>
-<div class="main">{_img(imgs["A"])}</div>
-<p>Jako hlavní doporučuji <b>variantu A</b>: odpovídá přesně na otázku („jak by se vyvíjela investice“), ukazuje
-vývoj v čase i konečné částky a srovnání je férové — všechny strategie dostaly stejné peníze ve stejný čas.
-Pro pronajímatele je překvapivé, jak velký náskok měl byt na hypotéku i bez započtení nájmu, a zároveň
-to otevírá důležitou debatu o rizicích páky. Varianta B je dobrý navazující příspěvek („bez hypotéky remíza“).</p>
+<div class="main">{_img(imgs["B"])}</div>
+<p>Jako hlavní doporučuji <b>variantu B</b>: odpovídá na jednoduchou otázku „co by dnes bylo z milionu z roku 2016“, ukazuje vývoj
+v čase i konečné částky všech pěti možností včetně inflace. Pro pronajímatele je překvapivé, jak velký náskok měl byt na hypotéku,
+a pro běžné střadatele, že spořicí účet reálně ztrácel. Varianta B2 je přirozený navazující příspěvek o tom, kolik se po cestě doplácelo.</p>
 
-<h2>Varianta A — vývoj investice v čase (stejné vklady)</h2>
-{_img(imgs["A"])}
-<h3>Jak graf vznikl</h3>
-<ul>
-<li><b>Vklady:</b> každá strategie dostane 1 000 000 Kč v květnu 2016 a pak 120 měsíčních vkladů ve výši splátky
-hypotéky ({kc(pay0)} do refixace, {kc(pay1)} po ní), celkem {mil(total_in)}.</li>
-<li><b>Byt s hypotékou:</b> 1 mil. Kč = 20 % ceny → byt za {mil(price0)}, úvěr {mil(price0 * 0.8)} na 30 let, anuita.
-Sazba = průměr ČNB za {qlabel(START_Q)} pro nové hypotéky s fixací 1–5 let ({pct(k["A"]["r1"], digits=2)}); po 5 letech
-refixace na průměr za {qlabel(START_Q + 20)} ({pct(k["A"]["r2"], digits=2)}). Hodnota = cena bytu podle indexu ČSÚ − zbývající dluh.
-Na konci: byt {mil(flat_end_value)}, dluh {mil(debt_end)}, zaplacené úroky celkem {mil(interest)}.</li>
-<li><b>Byt bez hypotéky:</b> za každý vklad se „dokoupí“ podíl průměrného bytu za aktuální cenu (index ČSÚ ČR celkem).</li>
-<li><b>S&amp;P 500:</b> celkový výnos (dividendy reinvestované), přepočteno měsíčním průměrem kurzu ČNB na koruny.</li>
-<li><b>Zlato:</b> měsíční průměrná cena (Světová banka) přepočtená na koruny.</li>
-<li><b>Graf:</b> čárový, hodnota v mil. Kč, šedá čárkovaná = kumulativně vloženo. Barvy jsou stejné ve všech
-variantách (modrá byt s hypotékou, oranžová akcie, tyrkysová byt bez hypotéky, žlutá zlato). Popisky přímo u konců čar.</li>
-<li><b>Kontrola:</b> tabulka robustnosti níže — náskok bytu s hypotékou drží ve všech testovaných variantách.</li>
-</ul>
-{_post(posts["A"])}
-
-<h2>Varianta B — jednorázový milion: byty (pronajaté i prázdné, s hypotékou i bez), akcie, zlato, spořicí účet</h2>
+<h2>Varianta B — jednorázový milion: pronajaté byty (s hypotékou i bez), akcie, zlato, spořicí účet</h2>
 {_img(imgs["B"])}
 <h3>Jak graf vznikl</h3>
 <ul>
 <li><b>Vklad:</b> jednorázově 1 mil. Kč v květnu 2016, dál už nic. Akcie, zlato a spořicí účet: 1 mil. Kč × (hodnota v květnu 2026 / hodnota v květnu 2016).</li>
-<li><b>Byt bez hypotéky:</b> byt za 1 mil. Kč (podíl průměrného bytu podle indexu ČSÚ ČR). <b>Byt s hypotékou:</b> 1 mil. Kč = 20% akontace → byt za {mil(fb["big"])},
-úvěr {mil(fb["big"] * 0.8)} na 30 let, stejná sazba a refixace jako ve variantě A (splátka {kc(fb["sched"]["payment"].iloc[0])}, po refixaci {kc(fb["sched"]["payment"].iloc[-1])}).</li>
-<li><b>Pronajatý byt:</b> hrubý nájem {pct(GROSS_YIELD, digits=0)} ceny z roku 2016 ročně, 1 měsíc v roce prázdný (čistý příjem {pct(GROSS_YIELD * (1 - VACANCY))} ceny), nájem dál roste podle indexu
+<li><b>Byt bez hypotéky:</b> byt za 1 mil. Kč (podíl průměrného bytu podle indexu ČSÚ ČR). <b>Byt s hypotékou:</b> 1 mil. Kč = 20% akontace → byt za {mil(big)},
+úvěr {mil(big * 0.8)} na 30 let, anuita. Sazba = průměr ČNB za {qlabel(START_Q)} pro nové hypotéky s fixací 1–5 let ({pct(sched["rate"].iloc[0], digits=2)}),
+po 5 letech refixace na průměr za {qlabel(START_Q + 20)} ({pct(sched["rate"].iloc[-1], digits=2)}). Splátka {kc(sched["payment"].iloc[0])}, po refixaci {kc(sched["payment"].iloc[-1])}.
+Na konci: byt {mil(big * growth)}, dluh {mil(sched["balance"].iloc[-1])}, zaplacené úroky celkem {mil(sched["interest"].sum())}.</li>
+<li><b>Pronajatý byt:</b> hrubý nájem {pct(GROSS_YIELD)} ceny z roku 2016 ročně, 1 měsíc v roce prázdný (čistý příjem {pct(GROSS_YIELD * (1 - VACANCY))} ceny), nájem dál roste podle indexu
 skutečného nájemného HICP (CP041, +{pct(d.hicp["CP041"].loc[mid_month(END_Q)] / d.hicp["CP041"].loc[mid_month(START_Q)] - 1, digits=0)} za 10 let). U bytu s hypotékou to dělá
 {kc(fb["rent_big"].iloc[1])} měsíčně na začátku a {kc(fb["rent_big"].iloc[-1])} na konci.</li>
-<li><b>Náklady vlastníka</b> (fond oprav, pojištění, daň z nemovitosti, drobné opravy): {pct(OWNER_COST, digits=0)} ceny z roku 2016 ročně, rostou s inflací HICP; platí pro pronajaté i prázdné byty.
+<li><b>Náklady vlastníka</b> (fond oprav, pojištění, daň z nemovitosti, drobné opravy): {pct(OWNER_COST, digits=0)} ceny z roku 2016 ročně, rostou s inflací HICP.
 U bytu s hypotékou {kc(fb["costs_big"].iloc[1])} měsíčně na začátku.</li>
 <li><b>Výsledek bytů</b> = cena bytu podle indexu ČSÚ − zbývající dluh + součet měsíčního cashflow (nájem − náklady − splátka). Záporné cashflow (doplatky z vlastní kapsy) se
-odečítá bez úroku, kladné se hromadí jako hotovost bez úroku. Doplatky tedy nejsou „zadarmo“, ale nepočítáme, že by je investor jinak mohl investovat — proto je férovější
-srovnání se stejnými vklady ve variantách A a D.</li>
+odečítá bez úroku, kladné se hromadí jako hotovost bez úroku. Výnos se zohledněním toho, kdy se doplácelo, ukazuje varianta D (IRR).</li>
 <li><b>Spořicí účet:</b> měsíční úročení průměrnou sazbou ČNB pro nové vklady domácností se splatností do 1 roku, po 15% srážkové dani (viz sekce Spořicí účet).</li>
 <li><b>Inflace:</b> HICP Česko — kolik korun je potřeba dnes na koupi toho, co stálo 1 mil. Kč v roce 2016 (podrobně v sekci Inflace).</li>
 <li><b>Kurzový efekt:</b> S&amp;P 500 v dolarech {times(k["B"]["end"]["sp500_usd"])}, v korunách {times(k["B"]["end"]["sp500"])};
@@ -1086,23 +954,34 @@ Bez dividend by S&amp;P 500 v korunách dalo {times(k["B"]["end"]["sp500_price"]
 <li><b>Riziko po cestě (max. propad v měsíčních datech):</b> S&amp;P 500 v Kč {pct(mdd["sp500"], digits=0)}, zlato {pct(mdd["zlato"], digits=0)},
 byt {pct(mdd["byt"], digits=0)}. Pozor: index bytů je čtvrtletní průměr transakcí, propady proto vypadají menší, než by byla
 skutečná kolísavost ceny jednoho bytu.</li>
-<li><b>Graf:</b> čárový; pronajaté byty plnou čarou, prázdné tečkovaně ve stejné barvě (modrá s hypotékou, tyrkysová bez), fialová spořicí účet, šedá čárkovaná inflace.
-Popisky u konců čar seřazené podle konečné hodnoty.</li>
+<li><b>Graf:</b> čárový; modrá byt s hypotékou, tyrkysová byt bez hypotéky, oranžová akcie, žlutá zlato, fialová spořicí účet, šedá čárkovaná inflace.
+Barvy jsou stejné ve všech variantách. Popisky u konců čar seřazené podle konečné hodnoty.</li>
+<li><b>Kontrola:</b> tabulka robustnosti níže — náskok pronajatého bytu s hypotékou drží ve všech testovaných variantách.</li>
 </ul>
-<h3>Citlivost varianty B</h3>
-{_table(rob_b, {c: mil for c in rob_b.columns})}
-<p class="note">Výnos z nájmu v roce 2016 je odhad (oficiální řada výnosnosti nájmu v ČR neexistuje). 5 % hrubého je střed běžně uváděného rozpětí
-(Praha kolem 4–5 %, krajská města 5–7 %). Daň z příjmu z nájmu není započtena (s 30% výdajovým paušálem by brala asi 10 % hrubého nájmu).</p>
+<h3>Výše nájmu — zdroj</h3>
+<p>Hrubý roční nájem = cena bytu / {dec(PRICE_TO_RENT, 1)} = <b>{pct(GROSS_YIELD, digits=2)} ceny bytu</b>. Poměr {dec(PRICE_TO_RENT, 1)} je ukazatel
+<b>„Poměr cena bytu / roční nájemné (dle IRI)“</b> ČNB, řádek TN.4 v tabulce indikátorů finanční stability (část 1, str. 160 PDF)
+<a href="{esc(URL_ZFS)}">Zprávy o finanční stabilitě 2015/2016</a> (ČNB, zveřejněno 14. 6. 2016). Hodnoty: 2010 21,9; 2011 21,7; 2012 21,3; 2013 21,6;
+2014 20,7; 2015 21,5; poslední údaj z roku 2016 21,9 — ten používáme, protože byt kupujeme v květnu 2016.
+ČNB ho počítá z nabídkových cen bytů a nabídkového tržního nájemného, které publikuje Institut regionálních informací (IRI), průměr ČR.
+Stejný ukazatel ČNB používá jako „výnos z pronájmu bytu“ (roční nájemné / cena bytu 68 m²; ZFS 2015/2016, graf II.24).</p>
+<ul>
+<li><b>Proč nabídkové ceny:</b> skutečné nájmy i ceny bývají o něco nižší než nabídkové; poměr se tím z velké části vyruší.</li>
+<li><b>Průměr ČR:</b> v Praze je výnos z nájmu nižší, v regionech vyšší. Ve variantě C proto počítáme se stejným nájmem jako % ceny všude (zjednodušení).</li>
+<li><b>Vývoj nájmu po roce 2016:</b> index skutečného nájemného HICP (CP041). Ten zahrnuje i regulované a dlouhodobé nájmy, tržní nájmy rostly spíš rychleji — nájem je tedy spíš podhodnocený.</li>
+<li><b>Neobsazenost a náklady:</b> 1 měsíc v roce bez nájmu a {pct(OWNER_COST, digits=0)} ceny ročně na fond oprav, pojištění, daň z nemovitosti a opravy jsou naše předpoklady (citlivost v tabulce robustnosti).</li>
+<li>Daň z příjmu z nájmu není započtena (s 30% výdajovým paušálem by brala asi 10 % hrubého nájmu).</li>
+</ul>
 {_post(posts["B"])}
 
 <h2>Varianta B2 — měsíční cashflow bytů z varianty B</h2>
 {_img(imgs["B2"])}
 <h3>Jak graf vznikl</h3>
 <ul>
-<li><b>Cashflow</b> = čistý nájem (jen pronajaté) − náklady vlastníka − splátka hypotéky (jen s hypotékou), měsíc po měsíci, stejné předpoklady jako B.</li>
-<li><b>Součty za 10 let:</b> {"; ".join(f"{esc(B_FLATS[c][0])} {mil(k['B2']['tot'][c])}" for c in B_FLATS)}.</li>
+<li><b>Cashflow</b> = čistý nájem − náklady vlastníka − splátka hypotéky (jen s hypotékou), měsíc po měsíci, stejné předpoklady jako B.</li>
+<li><b>Součty za 10 let:</b> {"; ".join(f"{esc(STRATEGIES[c][0])} {mil(k['B2']['tot'][c])}" for c in FLATS)}.</li>
 <li><b>Skoky:</b> refixace hypotéky v roce 2021 změnila splátku; nájem roste podle měsíčního indexu nájemného, náklady podle inflace.</li>
-<li><b>Graf:</b> čárový, Kč měsíčně, nulová čára zvýrazněná. Stejné barvy a styly čar jako v B.</li>
+<li><b>Graf:</b> čárový, Kč měsíčně, nulová čára zvýrazněná. Stejné barvy jako v B.</li>
 </ul>
 {_post(posts["B2"])}
 
@@ -1110,39 +989,42 @@ Popisky u konců čar seřazené podle konečné hodnoty.</li>
 {_img(imgs["C"])}
 <h3>Jak graf vznikl</h3>
 <ul>
-<li><b>Data:</b> stejné jako A, jen index cen bytů ČSÚ pro Prahu, resp. ČR bez Prahy (ČR celkem = vážený průměr 23,1 : 76,9).</li>
-<li><b>Výpočet:</b> stejné vklady jako A, stejná hypotéka (splátka nezávisí na regionu, protože vždy jde o 1 mil. Kč = 20 % ceny).</li>
-<li><b>Graf:</b> vodorovné sloupce seřazené podle konečné hodnoty, barva = typ strategie, čárkovaně vloženo celkem.</li>
-<li><b>Pozor:</b> výnos z nájmu je v Praze typicky nižší než v regionech, takže se započtením nájmu by rozdíl ve prospěch regionů byl spíš větší.
+<li><b>Data:</b> stejné jako B, jen index cen bytů ČSÚ pro Prahu, resp. ČR bez Prahy (ČR celkem = vážený průměr 23,1 : 76,9).</li>
+<li><b>Výpočet:</b> jednorázově 1 mil. Kč, pronajaté byty se stejnými předpoklady jako B (nájem {pct(GROSS_YIELD)} ceny, náklady {pct(OWNER_COST, digits=0)} ceny,
+stejná hypotéka — splátka nezávisí na regionu, protože vždy jde o 1 mil. Kč = 20 % ceny). Akcie a zlato jsou stejné jako v B.</li>
+<li><b>Ceny:</b> byty mimo Prahu zdražily {times(m["fl"]["equity"]["byt_najem"].iloc[-1] / OWN)}, pražské {times(p["fl"]["equity"]["byt_najem"].iloc[-1] / OWN)},
+průměr ČR {times(growth)}.</li>
+<li><b>Graf:</b> vodorovné sloupce seřazené podle konečné hodnoty, barva = typ strategie, čárkovaně vložený 1 mil. Kč.</li>
+<li><b>Pozor:</b> výnos z nájmu je v Praze typicky nižší než v regionech, takže s regionálním nájmem by rozdíl ve prospěch regionů byl spíš větší.
 Index „ČR bez Prahy“ pokrývá celou republiku, jednotlivá města se mohou výrazně lišit.</li>
 </ul>
 {_post(posts["C"])}
 
-<h2>Varianta D — roční výnos vlastních peněz (IRR)</h2>
+<h2>Varianta D — roční výnos vlastních peněz</h2>
 {_img(imgs["D"])}
 <h3>Jak graf vznikl</h3>
 <ul>
-<li><b>Výpočet:</b> vnitřní výnosové procento z měsíčních toků: −1 mil. Kč na začátku, −splátka každý měsíc, + konečná hodnota.
-Převedeno na roční (p. a.). Je to číslo srovnatelné s „výnosem fondu“ nebo úrokem na spořicím účtu.</li>
-<li><b>Spořicí účet:</b> měsíční vklady (stejné jako u ostatních) úročené sazbou ČNB nových vkladů do 1 roku, po 15% dani.</li>
+<li><b>Akcie, zlato, spořicí účet:</b> průměrný roční růst 1 mil. Kč za 10 let, (hodnota<sub>konec</sub> / 1 mil.)<sup>1/10</sup> − 1.</li>
+<li><b>Pronajaté byty:</b> vnitřní výnosové procento (IRR) z měsíčních toků: −1 mil. Kč na začátku, každý měsíc cashflow bytu (doplatek = další vklad,
+přebytek = výběr), na konci + čistá hodnota bytu (cena − dluh). Převedeno na roční (p. a.). U akcií a zlata dává stejný výpočet přesně průměrný roční růst,
+takže čísla jsou srovnatelná.</li>
+<li><b>Předpoklady bytů</b> jako ve variantě B: hrubý nájem {pct(GROSS_YIELD)} ceny ročně, 1 měsíc v roce prázdný, náklady vlastníka {pct(OWNER_COST, digits=0)} ceny ročně.</li>
+<li><b>Citlivost:</b> IRR pronajatého bytu s hypotékou v tabulce robustnosti níže (sloupec „IRR Pronajatý byt s hypotékou“) — od
+{pct(rob["IRR Pronajatý byt s hypotékou"].min())} do {pct(rob["IRR Pronajatý byt s hypotékou"].max())}.</li>
 <li><b>Inflace:</b> průměrná roční inflace HICP za stejné období (geometrický průměr; podrobně v sekci Inflace).</li>
 <li><b>Graf:</b> vodorovné sloupce seřazené podle výnosu.</li>
 </ul>
 {_post(posts["D"])}
 
-<h2>Vývoj po letech (varianta A)</h2>
+<h2>Vývoj po letech (varianta B)</h2>
 {_table(yearly, {c: mil for c in yearly.columns})}
-<p class="note">Hodnoty vždy v květnu daného roku.</p>
+<p class="note">Hodnoty vždy v květnu daného roku, u bytů po odečtení dluhu a včetně kumulovaného cashflow.</p>
 
 <h2>Robustnost</h2>
-<p>Každý řádek je celá simulace znovu se změněným jedním předpokladem. „zisk hyp. / zisk S&amp;P“ = (konečná hodnota − vloženo)
-bytu s hypotékou děleno totéž pro S&amp;P 500.</p>
-{_table(rob_view, {**m_fmt, "splátka": kc, "IRR byt s hyp.": pct, "IRR S&P 500": pct, "zisk hyp. / zisk S&P": times})}
-<p class="note">Varianty s nájmem: čistý nájem (po nákladech, opravách a neobsazenosti) jako % ceny bytu v roce 2016, dále roste
-podle indexu skutečného nájemného HICP (CP041, +{pct(d.hicp["CP041"].loc[mid_month(END_Q)] / d.hicp["CP041"].loc[mid_month(START_Q)] - 1, digits=0)} za 10 let).
-Nájem se jen hromadí na účtu (bez úroku), takže je to spíš dolní odhad.</p>
+<p>Každý řádek je celý výpočet znovu se změněným jedním předpokladem: konečná hodnota 1 mil. Kč v každé strategii a roční výnos (IRR, viz D)
+pro byty a akcie. Řádky „Byty jen Praha / ČR bez Prahy“ jsou varianta C.</p>
+{_table(rob, rob_fmt)}
 <img src="data:image/png;base64,{base64.b64encode(imgs["R"].read_bytes()).decode()}" alt="" style="max-width:720px">
-
 <h2>Inflace — odkud je číslo a proč je tak vysoké</h2>
 <p><b>Zdroj:</b> harmonizovaný index spotřebitelských cen (HICP) za Česko z Eurostatu, datová sada
 <a href="{esc(URL_HICP)}">prc_hicp_minr</a>, položka TOTAL, index 2015 = 100. Data do Eurostatu dodává ČSÚ.
@@ -1169,20 +1051,22 @@ Odpovídá tomu, co dostal aktivní střadatel, který přecházel za lepším s
 
 <h2>Datové zdroje</h2>
 {src_html}
+<h3>ČNB — Zpráva o finanční stabilitě 2015/2016, ukazatel cena bytu / roční nájemné (IRI)</h3>
+<p><a href="{esc(URL_ZFS)}">{esc(URL_ZFS)}</a><br>Tabulka indikátorů, část 1 (str. 160 PDF), řádek TN.4. Použitá hodnota {dec(PRICE_TO_RENT, 1)}
+(poslední údaj 2016) → hrubý výnos z nájmu {pct(GROSS_YIELD, digits=2)}. Hodnota je v kódu jako konstanta; PDF je uložené v surových datech.</p>
 <p class="note">Kontrola Shiller vs. FRED: měsíční průměr denních uzávěrek se v období 5/2016–6/2026 liší nejvýš o {pct(chk["fred_diff"], digits=2)}.</p>
 
 <h2>Předpoklady</h2>
 <ul>
 <li><b>Průměrný byt</b> = index realizovaných cen starších bytů ČSÚ (ČR celkem). Index měří změnu ceny, ne úroveň; částky
 jsou proto „na 1 mil. Kč vlastních peněz“. Výsledky jsou lineární — se 2 mil. Kč vlastních by vše bylo dvojnásobné.
-Byt za {mil(price0)} v roce 2016 byl nadprůměrně drahý, procenta ale platí pro jakoukoli cenu.</li>
+Byt za {mil(big)} v roce 2016 byl nadprůměrně drahý, procenta ale platí pro jakoukoli cenu.</li>
 <li><b>Hypotéka:</b> 80 % ceny (LTV), 30 let, anuitní splátka, sazba = průměr nových hypoték ČNB s fixací 1–5 let
 (nejčastější fixace v roce 2016) za čtvrtletí sjednání, refixace po 5 letech na tehdejší průměr nových hypoték.
 Bez poplatků bance, bez pojištění.</li>
-<li><b>Stejné vklady:</b> peníze na splátky musel investor mít; ostatní strategie stejné peníze investovaly. Tak se srovnává
-„co se stalo s mými penězi“, ne jen procento růstu ceny.</li>
-<li><b>Nájem a náklady bytu</b> (fond oprav, daň z nemovitosti, pojištění, opravy, neobsazenost) v základu nezapočítány.
-Čistý nájem je u pronajímaného bytu kladný, takže základní výpočet byt spíš podhodnocuje (viz robustnost s nájmem).</li>
+<li><b>Jednorázový vklad:</b> každá strategie dostane 1 mil. Kč v květnu 2016 a nic dalšího. Jediné další peníze jsou doplatky
+na splátku hypotéky, když nájem nestačil — ty se od výsledku odečítají (B, C), resp. v IRR počítají jako další vklad (D).</li>
+<li><b>Nájem a náklady bytu:</b> byty jsou pronajaté, nájem podle ČNB/IRI, neobsazenost a náklady vlastníka jsou naše předpoklady — viz „Výše nájmu — zdroj“.</li>
 <li><b>Daně a poplatky:</b> nezapočteny. Byt koupený v roce 2016 je po 10 letech osvobozen od daně z příjmu při prodeji
 (časový test 5 let pro byty nabyté před 2021), akcie po 3 letech také. Srážková daň z dividend (15 %) by výnos S&amp;P snížila asi
 o 0,2 p. b. ročně, poplatek ETF asi o 0,1 p. b. Daň z nabytí nemovitosti (4 %) v květnu 2016 platil prodávající — viz řádek „náklady 4 %“.</li>
@@ -1195,8 +1079,10 @@ o 0,2 p. b. ročně, poplatek ETF asi o 0,1 p. b. Daň z nabytí nemovitosti (4 
 <li>Celkový výnos S&amp;P 500: TR<sub>t</sub> = TR<sub>t−1</sub> × (P<sub>t</sub> + D<sub>t</sub>/12) / P<sub>t−1</sub> (Shillerova konvence), v Kč × kurz CZK/USD.</li>
 <li>Splátka: anuita B × i / (1 − (1 + i)<sup>−n</sup>), i = sazba/12, n = zbývající počet měsíců z 360; při refixaci přepočtena ze zůstatku.</li>
 <li>Hodnota bytu s hypotékou: cena<sub>0</sub> × index<sub>t</sub> / index<sub>0</sub> − zůstatek úvěru<sub>t</sub>.</li>
-<li>Ostatní strategie: počet „jednotek“ = 1 mil. / cena<sub>0</sub> + Σ splátka<sub>k</sub> / cena<sub>k</sub>; hodnota = jednotky × cena<sub>t</sub>.</li>
-<li>IRR: měsíční sazba r řešící Σ CF<sub>t</sub> / (1 + r)<sup>t</sup> = 0 (bisekce), roční = (1 + r)<sup>12</sup> − 1.</li>
+<li>Cashflow bytu: nájem<sub>t</sub> = cena<sub>0</sub> × {dec(GROSS_YIELD * 100, 2)} % / 12 × 11/12 × index nájemného<sub>t</sub> / index<sub>0</sub>; náklady<sub>t</sub> = cena<sub>0</sub> × 1 % / 12 × HICP<sub>t</sub> / HICP<sub>0</sub>;
+cashflow = nájem − náklady − splátka. Výsledek bytu = cena<sub>0</sub> × index<sub>t</sub> / index<sub>0</sub> − zůstatek úvěru<sub>t</sub> + Σ cashflow.</li>
+<li>Akcie, zlato, spořicí účet: 1 mil. × hodnota<sub>t</sub> / hodnota<sub>0</sub>.</li>
+<li>IRR (varianta D): měsíční sazba r řešící Σ CF<sub>t</sub> / (1 + r)<sup>t</sup> = 0 (bisekce), CF = −1 mil. na začátku, měsíční cashflow, + čistá hodnota bytu na konci; roční = (1 + r)<sup>12</sup> − 1.</li>
 </ul>
 
 <h2>Postup</h2>
@@ -1205,8 +1091,8 @@ o 0,2 p. b. ročně, poplatek ETF asi o 0,1 p. b. Daň z nabytí nemovitosti (4 
 S&amp;P 500 s dividendami; ověřeno proti FRED), Světová banka (zlato), Eurostat/ČSÚ (inflace, nájemné), ČNB (sazby vkladů pro spořicí účet), ČSÚ CPI (kontrola inflace).</li>
 <li>Stažení skriptem <code>download.py</code> do <code>{esc(str(raw.relative_to(monaco.ROOT)))}</code>.</li>
 <li>Zpracování: převod všeho na měsíční řady v Kč, interpolace čtvrtletního indexu bytů.</li>
-<li>Simulace čtyř strategií se stejnými peněžními toky, výpočet hodnoty v čase a IRR.</li>
-<li>Kandidátní grafy A–D (B s byty pronajatými i prázdnými a spořicím účtem, B2 cashflow), kontrola robustnosti, kontrola zdrojových dat (Shiller vs. FRED, HICP vs. CPI ČSÚ).</li>
+<li>Výpočet pěti strategií pro jednorázový 1 mil. Kč: hodnota v čase, měsíční cashflow pronajatých bytů, roční výnos (IRR).</li>
+<li>Kandidátní grafy B, B2, C, D (varianta A se stejnými měsíčními vklady byla vyřazena), kontrola robustnosti (15 variant), kontrola zdrojových dat (Shiller vs. FRED, HICP vs. CPI ČSÚ).</li>
 <li>Výstupy: obrázky 1080 × 1350 px, texty příspěvků, tento report, data v CSV.</li>
 </ol>
 
@@ -1224,7 +1110,7 @@ To je užitečné při rozhodování dnes, kdy jsou úvěry dvakrát dražší.<
 nejistota je v tom, že index ČSÚ je průměr trhu — konkrétní byt mohl dopadnout jinak.</li>
 <li><b>Výjimečné období.</b> 2016 byl začátek největšího růstu cen bytů v historii ČR, se sazbami hypoték kolem 2 %.
 Stejný výpočet od roku 2008 nebo od 2022 by vypadal jinak. Varování o páce do příspěvků patří.</li>
-<li><b>Riziko a likvidita nejsou v číslech.</b> Byt s 80% hypotékou znamená dluh {mil(price0 * 0.8)} na 1 mil. Kč vlastních. Kdyby ceny
+<li><b>Riziko a likvidita nejsou v číslech.</b> Byt s 80% hypotékou znamená dluh {mil(big * 0.8)} na 1 mil. Kč vlastních. Kdyby ceny
 klesly o 20 %, vlastní kapitál zmizí. S&amp;P 500 v korunách během období krátce ztratilo {pct(-mdd["sp500"], digits=0)}, ale bez dluhu.</li>
 <li><b>Náklad na čas.</b> Pronajímání je práce, ETF ne. To čísla nezachycují.</li>
 <li><b>Další kroky:</b> (1) přidat skutečný výnos z nájmu po městech (Deloitte Rent Index / ČSÚ); (2) stejné srovnání pro start
@@ -1263,14 +1149,11 @@ def main() -> None:
     raw = latest_raw()
     d = load(raw)
 
-    base = simulate(d, Scenario())
+    base = run(d)
     regions = {
-        r: (base if r == "cr" else simulate(d, Scenario(region=r))) for r in ("cr", "praha", "mimo")
+        r: (base if r == "cr" else run(d, Scenario(region=r))) for r in ("cr", "praha", "mimo")
     }
-    lump = lump_sum(d)
-    rob = robustness(d, base)
-    fl = flat_strategies(d)
-    rob_b = robustness_b(d)
+    rob = robustness(d)
     infl = inflation_table(d)
     window = pd.period_range("2016-05", "2026-06", freq="M")
     cpi_end = d.cpi.index[-1]
@@ -1284,22 +1167,19 @@ def main() -> None:
         "shock": hicp[pd.Period("2023-05", "M")] / hicp[pd.Period("2021-05", "M")] - 1,
         "calm_y": (1 + calm).prod() ** (1 / len(calm)) - 1,
     }
-    mdd = {k_: max_drawdown(lump[k_]) for k_ in ("sp500", "zlato", "byt")}
+    mdd = {k_: max_drawdown(base["lump"][k_]) for k_ in ("sp500", "zlato", "byt")}
 
     (out / "data").mkdir()
-    paths = base["paths"].assign(vlozeno=base["invested"])
-    paths.to_csv(out / "data" / "strategie_mesicne.csv")
-    base["sched"].to_csv(out / "data" / "hypoteka_splatky.csv")
-    lump.to_csv(out / "data" / "jednorazove_1mil.csv")
+    base["paths"].to_csv(out / "data" / "strategie_mesicne.csv")
+    base["fl"]["cf"].to_csv(out / "data" / "byty_cashflow_mesicne.csv")
+    base["fl"]["sched"].to_csv(out / "data" / "hypoteka_splatky.csv")
+    base["lump"].to_csv(out / "data" / "jednorazove_1mil.csv")
+    pd.DataFrame({r: v["final"] for r, v in regions.items()}).to_csv(out / "data" / "regiony.csv")
+    base["irr"].to_csv(out / "data" / "rocni_vynos.csv")
     rob.to_csv(out / "data" / "robustnost.csv")
-    fl["wealth"].to_csv(out / "data" / "B_byty_vysledek_mesicne.csv")
-    fl["cf"].to_csv(out / "data" / "B2_byty_cashflow_mesicne.csv")
-    rob_b.to_csv(out / "data" / "B_robustnost.csv")
     infl.to_csv(out / "data" / "inflace_po_letech.csv")
-    base["prices"].to_csv(out / "data" / "ceny_kc_mesicne.csv")
 
     imgs = {
-        "A": out / "A_investice_v_case.png",
         "B": out / "B_jednorazove_1mil.png",
         "B2": out / "B2_cashflow_bytu.png",
         "C": out / "C_praha_vs_regiony.png",
@@ -1308,15 +1188,14 @@ def main() -> None:
         "S": out / "metodika_sazby_vkladu.png",
     }
     k = {
-        "A": chart_a_wealth(base, imgs["A"]),
-        "B": chart_b_lump(lump, fl, imgs["B"]),
-        "B2": chart_b2_cashflow(fl, imgs["B2"]),
+        "B": chart_b_lump(base, imgs["B"]),
+        "B2": chart_b2_cashflow(base["fl"], imgs["B2"]),
         "C": chart_c_regions(regions, imgs["C"]),
-        "D": chart_d_irr(base, lump, imgs["D"]),
+        "D": chart_d_irr(base, imgs["D"]),
     }
     chart_rates(d, imgs["R"])
     chart_savings(d, imgs["S"])
-    posts = post_texts(base, lump, regions, rob, k, fl, infl)
+    posts = post_texts(base, regions, rob, k, infl)
     (out / "texty_prispevku.md").write_text(
         "\n\n".join(f"## Varianta {v}\n\n{t}" for v, t in posts.items()) + "\n", encoding="utf-8"
     )
@@ -1325,7 +1204,6 @@ def main() -> None:
         {
             "d": d,
             "base": base,
-            "lump": lump,
             "regions": regions,
             "rob": rob,
             "posts": posts,
@@ -1334,8 +1212,6 @@ def main() -> None:
             "raw": raw,
             "chk": chk,
             "mdd": mdd,
-            "fl": fl,
-            "rob_b": rob_b,
             "infl": infl,
         },
     )
