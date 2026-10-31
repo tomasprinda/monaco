@@ -26,6 +26,17 @@ SOURCES = {
     "cnb_ecb_mir": {
         "mir_cz_house_purchase.csv": "https://data-api.ecb.europa.eu/service/data/MIR/M.CZ.B.A2C..R.A.2250.CZK.N?format=csvdata",
     },
+    # ČNB MFI interest rate statistics (ECB Data Portal): CZK deposits from households, new
+    # business — overnight deposits (L21, current + savings accounts) and deposits with agreed
+    # maturity (L22: F ≤1 y, G 1–2 y, H >2 y). Used for the savings account strategy.
+    "cnb_ecb_mir_deposits": {
+        "mir_cz_deposits.csv": "https://data-api.ecb.europa.eu/service/data/MIR/M.CZ.B.L21+L22..R.A.2250.CZK.N?format=csvdata",
+    },
+    # ČSÚ consumer price index (national CPI), monthly since 1995; cross-check of HICP inflation.
+    # https://vdb.czso.cz/pll/eweb/package_show?id=010022
+    "csu_cpi": {
+        "010022.csv": "https://csu.gov.cz/docs/107508/cfcf22e1-06b0-92a6-cf41-fb554acc545a/010022-25data011326.csv?version=1.0",
+    },
     # ČNB daily exchange rates, one file per year.
     "cnb_fx": {
         f"kurzy_{y}.txt": "https://www.cnb.cz/cs/financni-trhy/devizovy-trh/kurzy-devizoveho-trhu/"

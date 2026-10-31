@@ -1,12 +1,17 @@
 # ruff: noqa: E501  (long lines are Czech prose inside the HTML report and post texts)
 """How 10 years of investing would have turned out (2Q 2016 → 2Q 2026), from a Czech investor's view.
 
-Compares S&P 500 (dividends reinvested), gold, an average Czech flat bought for cash and the same
-flat bought with an 80 % mortgage at the interest rate of the time. Everything is in CZK.
+Compares S&P 500 (dividends reinvested), gold, a savings account, an average Czech flat bought for
+cash and the same flat bought with an 80 % mortgage at the interest rate of the time. Everything is
+in CZK.
 
 Fair comparison: every strategy gets exactly the same money at the same time — 1 mil. Kč at the
 start plus, every month, the amount of the mortgage installment. The mortgage strategy pays the
 installment; the others invest it.
+
+Variant B instead puts 1 mil. Kč in once and adds the flats rented out / left empty, with and without
+a mortgage. Their monthly cash flow (rent − costs − installment) may be negative; it is charted
+separately (B2) and the cumulative cash flow is part of the flat's net result.
 
 Reads the latest download from data/raw/investment_comparison/ (see download.py) and writes
 processed data, one social-media image per variant, post texts and a Czech HTML report to
@@ -46,11 +51,26 @@ URL_SHILLER = "https://shillerdata.com/"
 URL_FRED = "https://fred.stlouisfed.org/series/SP500"
 URL_WB = "https://www.worldbank.org/en/research/commodity-markets"
 URL_HICP = "https://ec.europa.eu/eurostat/databrowser/view/prc_hicp_minr/"
+URL_DEP = "https://data.ecb.europa.eu/data/datasets/MIR (série M.CZ.B.L21+L22.*.R.A.2250.CZK.N)"
+URL_CPI = "https://vdb.czso.cz/pll/eweb/package_show?id=010022"
 SOURCE = (
-    "Zdroje: ČSÚ (indexy realizovaných cen starších bytů), ČNB (sazby nových hypoték, kurz USD/CZK),\n"
-    "R. Shiller (S&P 500 vč. dividend), Světová banka (zlato). Měsíční průměry, vše v korunách.\n"
-    "Nezapočteno: nájem a náklady bytu, daně, poplatky. Minulé výnosy nezaručují budoucí."
+    "Zdroje: ČSÚ (ceny starších bytů), ČNB (sazby hypoték a vkladů, kurz USD/CZK), R. Shiller\n"
+    "(S&P 500 vč. dividend), Světová banka (zlato), Eurostat/ČSÚ (inflace HICP). Vše v korunách.\n"
+    "Nezapočteno: nájem a náklady bytu, daně (kromě 15% daně z úroků), poplatky. Minulé výnosy nezaručují budoucí."
 )
+SOURCE_B = (
+    "Zdroje: ČSÚ (ceny starších bytů), ČNB (sazby hypoték a vkladů, kurz USD/CZK), R. Shiller\n"
+    "(S&P 500 vč. dividend), Světová banka (zlato), Eurostat/ČSÚ (inflace a nájemné v HICP). Vše v korunách.\n"
+    "Nezapočteno: daň z příjmu z nájmu, poplatky, úrok z hotovosti. Minulé výnosy nezaručují budoucí."
+)
+
+# Variant B: rented flats. Gross rent as a share of the 2016 price (estimate, see report), one
+# month a year empty, owner costs (repair fund, insurance, property tax, repairs) as a share of the
+# 2016 price. Rent grows with HICP actual rentals (CP041), costs with HICP total.
+GROSS_YIELD = 0.05
+VACANCY = 1 / 12
+OWNER_COST = 0.01
+SAVINGS_TAX = 0.15  # withholding tax on deposit interest
 
 # Chart styling (reference dataviz palette). Colour follows the strategy in every chart.
 INK = "#0b0b0b"
@@ -64,6 +84,14 @@ STRATEGIES = {  # key: (label, colour)
     "sp500": ("Akcie S&P 500", "#eb6834"),
     "byt": ("Byt bez hypotéky", "#1baf7a"),
     "zlato": ("Zlato", "#eda100"),
+    "sporici": ("Spořicí účet", "#6250d6"),
+}
+A_KEYS = ["byt_hypo", "sp500", "byt", "zlato"]
+B_FLATS = {  # key: (label, colour, linestyle); rented = solid, empty = dotted
+    "byt_hypo_najem": ("Byt s hypotékou, pronajatý", "#2a78d6", "-"),
+    "byt_hypo": ("Byt s hypotékou, prázdný", "#2a78d6", ":"),
+    "byt_najem": ("Byt bez hypotéky, pronajatý", "#1baf7a", "-"),
+    "byt": ("Byt bez hypotéky, prázdný", "#1baf7a", ":"),
 }
 plt.rcParams.update(
     {
@@ -205,6 +233,27 @@ def load_hicp(raw: Path) -> pd.DataFrame:
     return p
 
 
+def load_deposits(raw: Path) -> pd.DataFrame:
+    """ČNB household CZK deposit rates, new business (% p.a.): overnight (L21), agreed maturity ≤1 y (F)."""
+    df = pd.read_csv(raw / "cnb_ecb_mir_deposits" / "mir_cz_deposits.csv")
+    df["col"] = (
+        df["BS_ITEM"].map({"L21": "overnight", "L22": "term"}) + "_" + df["MATURITY_NOT_IRATE"]
+    )
+    p = df.pivot(index="TIME_PERIOD", columns="col", values="OBS_VALUE")
+    p.index = pd.PeriodIndex(p.index, freq="M")
+    return p.rename(columns={"overnight_A": "overnight", "term_F": "term_1y"})
+
+
+def load_cpi(raw: Path) -> pd.Series:
+    """ČSÚ national CPI, all items, monthly index (avg 2015 = 100)."""
+    df = pd.read_csv(raw / "csu_cpi" / "010022.csv")
+    df = df[df["ucel_kod"].isna() & (df["casz_kod"] == "Z")]
+    idx = pd.PeriodIndex(
+        [f"{y}-{m:02d}" for y, m in zip(df["rok"], df["mesic"], strict=True)], freq="M"
+    )
+    return pd.Series(df["hodnota"].values, index=idx).sort_index()
+
+
 @dataclass
 class Data:
     flats: pd.DataFrame
@@ -214,6 +263,8 @@ class Data:
     gold: pd.Series
     hicp: pd.DataFrame
     fred: pd.Series
+    dep: pd.DataFrame
+    cpi: pd.Series
 
 
 def load(raw: Path) -> Data:
@@ -227,6 +278,8 @@ def load(raw: Path) -> Data:
             gold=load_gold(raw),
             hicp=load_hicp(raw),
             fred=load_fred_spx(raw),
+            dep=load_deposits(raw),
+            cpi=load_cpi(raw),
         )
 
 
@@ -245,6 +298,13 @@ def flat_monthly(flats: pd.Series, months: pd.PeriodIndex) -> pd.Series:
     ts = months.to_timestamp()
     full = np.log(s).reindex(s.index.union(ts)).interpolate("time")
     return pd.Series(np.exp(full.reindex(ts).values), index=months)
+
+
+def savings_index(rates: pd.Series, months: pd.PeriodIndex) -> pd.Series:
+    """Value of 1 Kč on a deposit: each month earns that month's rate / 12, after withholding tax."""
+    r = rates.reindex(months) / 100 * (1 - SAVINGS_TAX) / 12
+    assert not r.isna().any(), "missing deposit rates"
+    return (1 + r.shift(1, fill_value=0.0)).cumprod()
 
 
 def annuity(balance: float, rate: float, n: int) -> float:
@@ -304,6 +364,7 @@ def simulate(d: Data, sc: Scenario) -> dict:
         "sp500": (spx_usd * d.usd).reindex(months),
         "zlato": (d.gold * d.usd).reindex(months),
         "byt": flat * (1 + sc.buy_cost),
+        "sporici": savings_index(d.dep["term_1y"], months),
     }
     assert not any(p.isna().any() for p in prices.values()), "missing monthly prices"
 
@@ -351,6 +412,61 @@ def simulate(d: Data, sc: Scenario) -> dict:
     }
 
 
+def flat_strategies(d: Data, sc: Scenario | None = None, gross_yield: float = GROSS_YIELD,
+                    owner_cost: float = OWNER_COST) -> dict:  # fmt: skip
+    """Variant B flats for 1 mil. Kč put in once: bought for cash or with a mortgage, rented or empty.
+
+    Monthly cash flow = net rent (rented only) − owner costs − installment (mortgage only); it starts
+    the month after purchase. Net result = flat value − remaining debt + cumulative cash flow, i.e.
+    out-of-pocket top-ups are subtracted and surpluses kept as cash without interest.
+    """
+    sc = sc or Scenario()
+    months = pd.period_range(mid_month(sc.start), mid_month(sc.end), freq="M")
+    flat = flat_monthly(d.flats[sc.region], months)
+    growth = flat / flat.iloc[0]
+    rent_g = d.hicp["CP041"].reindex(months) / d.hicp["CP041"].reindex(months).iloc[0]
+    cost_g = d.hicp["TOTAL"].reindex(months) / d.hicp["TOTAL"].reindex(months).iloc[0]
+    after_purchase = pd.Series(np.arange(len(months)) > 0, index=months).astype(float)
+
+    big = OWN / (1 - sc.ltv)  # flat bought with OWN as the down payment
+    sched = mortgage(big, sc, months, d.mir)
+    pay = sched["payment"].reindex(months, fill_value=0.0)
+    debt = sched["balance"].reindex(months).fillna(big * sc.ltv)
+
+    def rent(price0: float) -> pd.Series:
+        return gross_yield / 12 * (1 - VACANCY) * price0 * rent_g * after_purchase
+
+    def costs(price0: float) -> pd.Series:
+        return owner_cost / 12 * price0 * cost_g * after_purchase
+
+    cf = pd.DataFrame(
+        {
+            "byt_hypo_najem": rent(big) - costs(big) - pay,
+            "byt_hypo": -costs(big) - pay,
+            "byt_najem": rent(OWN) - costs(OWN),
+            "byt": -costs(OWN),
+        }
+    )
+    equity = pd.DataFrame(
+        {
+            "byt_hypo_najem": big * growth - debt,
+            "byt_hypo": big * growth - debt,
+            "byt_najem": OWN * growth,
+            "byt": OWN * growth,
+        }
+    )
+    return {
+        "months": months,
+        "cf": cf,
+        "equity": equity,
+        "wealth": equity + cf.cumsum(),
+        "sched": sched,
+        "big": big,
+        "rent_big": rent(big),
+        "costs_big": costs(big),
+    }
+
+
 def lump_sum(d: Data, start: pd.Period = START_Q, end: pd.Period = END_Q) -> pd.DataFrame:
     """Value of OWN invested once at the start, no mortgage, no further contributions."""
     months = pd.period_range(mid_month(start), mid_month(end), freq="M")
@@ -360,6 +476,8 @@ def lump_sum(d: Data, start: pd.Period = START_Q, end: pd.Period = END_Q) -> pd.
             "zlato": (d.gold * d.usd).reindex(months),
             "byt": flat_monthly(d.flats["cr"], months),
             "inflace": d.hicp["TOTAL"].reindex(months),
+            "sporici": savings_index(d.dep["term_1y"], months),
+            "sporici_bezny": savings_index(d.dep["overnight"], months),
             "sp500_usd": d.spx["tr"].reindex(months),
             "sp500_price": (d.spx["P"] * d.usd).reindex(months),
             "zlato_usd": d.gold.reindex(months),
@@ -369,6 +487,21 @@ def lump_sum(d: Data, start: pd.Period = START_Q, end: pd.Period = END_Q) -> pd.
         }
     )
     return OWN * s / s.iloc[0]
+
+
+def robustness_b(d: Data) -> pd.DataFrame:
+    """Final net result of the variant B flats under changed assumptions."""
+    variants = {
+        f"Základ (nájem {pct(GROSS_YIELD, digits=0)}, náklady {pct(OWNER_COST, digits=0)})": {},
+        "Hrubý nájem 4 % ceny": {"gross_yield": 0.04},
+        "Hrubý nájem 6 % ceny": {"gross_yield": 0.06},
+        "Náklady 1,5 % ceny": {"owner_cost": 0.015},
+        "Náklady 0,5 % ceny": {"owner_cost": 0.005},
+        "Byty jen Praha": {"sc": Scenario(region="praha")},
+        "Byty jen ČR bez Prahy": {"sc": Scenario(region="mimo")},
+    }
+    rows = {name: flat_strategies(d, **kw)["wealth"].iloc[-1] for name, kw in variants.items()}
+    return pd.DataFrame(rows).T.rename(columns={k: v[0] for k, v in B_FLATS.items()})
 
 
 def max_drawdown(s: pd.Series) -> float:
@@ -412,6 +545,27 @@ def robustness(d: Data, base: dict) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(rows).set_index("varianta")
+
+
+def inflation_table(d: Data) -> pd.DataFrame:
+    """Inflation by year: HICP May→May (the analysis window) and ČSÚ CPI annual average."""
+    rows = []
+    for y in range(START_Q.year, END_Q.year):
+        a, b = pd.Period(f"{y}-05", "M"), pd.Period(f"{y + 1}-05", "M")
+        cpi_avg = (d.cpi[d.cpi.index.year == y + 1].mean() / d.cpi[d.cpi.index.year == y].mean() - 1
+                   if (d.cpi.index.year == y + 1).sum() == 12 else np.nan)  # fmt: skip
+        rows.append(
+            {
+                "období": f"5/{y} → 5/{y + 1}",
+                "HICP (Eurostat/ČSÚ)": d.hicp.loc[b, "TOTAL"] / d.hicp.loc[a, "TOTAL"] - 1,
+                "CPI ČSÚ, stejné období": d.cpi.loc[b] / d.cpi.loc[a] - 1
+                if b in d.cpi.index
+                else np.nan,
+                "CPI ČSÚ, průměr roku konce": cpi_avg,
+                "nájemné HICP (CP041)": d.hicp.loc[b, "CP041"] / d.hicp.loc[a, "CP041"] - 1,
+            }
+        )
+    return pd.DataFrame(rows).set_index("období")
 
 
 # --------------------------------------------------------------------------------------------
@@ -467,17 +621,21 @@ def _mil_axis(v, _) -> str:
 
 
 def _line_chart(ax, months: pd.PeriodIndex, series: list[tuple[pd.Series, str, str, str]],
-                gap: float) -> None:  # fmt: skip
+                gap: float, yfmt: Callable = _mil_axis, fontsize: float = 12) -> None:  # fmt: skip
     """series: (values, end label, colour, linestyle). Values in CZK, x = time."""
     x = months.to_timestamp()
     for values, _, color, ls in series:
-        ax.plot(x, values.values, color=color, lw=2.6 if ls == "-" else 1.8, ls=ls,
+        ax.plot(x, values.values, color=color, lw={"-": 2.6, ":": 2.4}.get(ls, 1.8), ls=ls,
                 solid_capstyle="round")  # fmt: skip
     _clean(ax)
-    ax.yaxis.set_major_formatter(FuncFormatter(_mil_axis))
+    ax.yaxis.set_major_formatter(FuncFormatter(yfmt))
     ax.tick_params(labelsize=11)
     ax.set_xlim(x[0], x[-1])
-    ax.set_ylim(0, max(v.max() for v, *_ in series) * 1.06)
+    lo = min(v.min() for v, *_ in series)
+    hi = max(v.max() for v, *_ in series)
+    ax.set_ylim(min(0, lo * 1.08), hi * 1.06)
+    if lo < 0:
+        ax.axhline(0, color=INK2, lw=1)
     ax.xaxis.set_major_locator(plt.matplotlib.dates.YearLocator(2))
     ax.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter("%Y"))
     # Direct end labels: coloured dot at the line end, ink text on the right, de-overlapped.
@@ -486,18 +644,18 @@ def _line_chart(ax, months: pd.PeriodIndex, series: list[tuple[pd.Series, str, s
     shift = ax.transData + ScaledTranslation(14 / 72, 0, ax.figure.dpi_scale_trans)
     for (y, label, color), ly in zip(ends, ys, strict=True):
         ax.plot([x[-1]], [y], "o", color=color, ms=8, mec=SURFACE, mew=2, zorder=5, clip_on=False)
-        ax.text(x[-1], ly, label, transform=shift, va="center", fontsize=12, color=INK,
+        ax.text(x[-1], ly, label, transform=shift, va="center", fontsize=fontsize, color=INK,
                 linespacing=1.3)  # fmt: skip
 
 
 def chart_a_wealth(base: dict, path: Path) -> dict:
     p, inv, f = base["paths"], base["invested"], base["final"]
-    gains = f - base["total_in"]
+    gains = f[A_KEYS] - base["total_in"]
     best_other = gains.drop("byt_hypo").idxmax()
     ratio = gains["byt_hypo"] / gains[best_other]
     sched = base["sched"]
     r1, r2 = sched["rate"].iloc[0], sched["rate"].iloc[-1]
-    series = [(p[k], f"{STRATEGIES[k][0]}\n{mil(f[k])}", STRATEGIES[k][1], "-") for k in STRATEGIES]
+    series = [(p[k], f"{STRATEGIES[k][0]}\n{mil(f[k])}", STRATEGIES[k][1], "-") for k in A_KEYS]
     series.append((inv, f"Vloženo celkem\n{mil(base['total_in'])}", MUTED, "--"))
     social_image(
         path,
@@ -516,25 +674,87 @@ def chart_a_wealth(base: dict, path: Path) -> dict:
     return {"ratio": ratio, "best_other": best_other, "gains": gains, "r1": r1, "r2": r2}
 
 
-def chart_b_lump(lump: pd.DataFrame, months: pd.PeriodIndex, path: Path) -> dict:
+def chart_b_lump(lump: pd.DataFrame, fl: dict, path: Path) -> dict:
+    """1 mil. Kč put in once: flats (rented / empty, with / without mortgage), S&P, gold, savings."""
+    w = fl["wealth"]
     end = lump.iloc[-1] / OWN
-    keys = ["sp500", "zlato", "byt"]
-    lo, hi = end[keys].min(), end[keys].max()
-    series = [(lump[k], f"{STRATEGIES[k][0] if k != 'byt' else 'Průměrný byt'}\n{mil(lump[k].iloc[-1])}",
-               STRATEGIES[k][1], "-") for k in keys]  # fmt: skip
-    series.append((lump["inflace"], f"Inflace\n{mil(lump['inflace'].iloc[-1])}", MUTED, "--"))
+    sched = fl["sched"]
+    vals = {**{k: w[k] for k in B_FLATS}, **{k: lump[k] for k in ("sp500", "zlato", "sporici")}}
+    styles = {**B_FLATS, **{k: (*STRATEGIES[k], "-") for k in ("sp500", "zlato", "sporici")}}
+    order = sorted(vals, key=lambda k: -vals[k].iloc[-1])
+    series = [(vals[k], f"{styles[k][0]}\n{mil(vals[k].iloc[-1])}", styles[k][1], styles[k][2])
+              for k in order]  # fmt: skip
+    series.append(
+        (lump["inflace"], f"Inflace (HICP)\n{mil(lump['inflace'].iloc[-1])}", MUTED, "--")
+    )
+    top = vals[order[0]].iloc[-1]
+    # Claims in the subtitle and post text.
+    assert order[0] == "byt_hypo_najem" and fl["cf"]["byt_hypo_najem"].sum() > 0
+    assert w["byt_hypo"].iloc[-1] > lump["sp500"].iloc[-1]
+    assert min(v.iloc[-1] for k, v in vals.items() if k != "sporici") > lump["inflace"].iloc[-1]
+    assert lump["sporici"].iloc[-1] < lump["inflace"].iloc[-1]
     social_image(
         path,
-        ("Bez hypotéky skončily akcie, zlato", "i byt skoro stejně"),
+        (
+            "Milion z roku 2016: v pronajatém bytě",
+            f"na hypotéku {mil(top)}, na spořáku {mil(lump['sporici'].iloc[-1])}",
+        ),
         [
-            f"Hodnota 1 mil. Kč vloženého jednorázově v {qlabel(START_Q)}, bez dalších vkladů.",
-            f"Za 10 let peníze vzrostly {times(lo)} až {times(hi)}. Akcie v dolarech by vydělaly víc ({times(end['sp500_usd'])}),",
-            f"ale koruna k dolaru posílila o {pct(1 - lump['usd'].iloc[-1] / lump['usd'].iloc[0], digits=0)} a část zisku smazala.",
-            "Šedá čárkovaná: kolik by stálo totéž co 1 mil. Kč v roce 2016 (inflace HICP).",
+            f"Hodnota 1 mil. Kč vloženého jednorázově v {qlabel(START_Q)}. Byt bez hypotéky za 1 mil. Kč,",
+            f"s hypotékou za {mil(fl['big'], 0)} (80% úvěr, sazba {pct(sched['rate'].iloc[0], digits=1)}, od 2021 {pct(sched['rate'].iloc[-1], digits=1)}).",
+            "U bytů: cena − dluh + nájem − náklady − splátky. Co bylo nutné doplácet, je odečteno (graf B2).",
+            f"Nájem {pct(GROSS_YIELD, digits=0)} ceny ročně, 1 měsíc prázdný, náklady {pct(OWNER_COST, digits=0)} ceny. Spořicí účet: sazby ČNB",
+            f"vkladů do 1 roku, po dani. Šedá čárkovaná: inflace, {pct(end['inflace'] ** 0.1 - 1)} ročně (2022–23 přes 10 %).",
         ],
-        lambda ax: _line_chart(ax, months, series, gap=0.32e6),
+        lambda ax: _line_chart(ax, fl["months"], series, gap=0.75e6, fontsize=11),
+        axes_rect=(0.1, 0.15, 0.56, 0.6),
+        source=SOURCE_B,
     )
-    return {"end": end, "lo": lo, "hi": hi}
+    trio = end[["sp500", "zlato", "byt"]]  # bought for cash, no rent or costs
+    return {
+        "end": end,
+        "wealth_end": w.iloc[-1],
+        "order": order,
+        "lo": trio.min(),
+        "hi": trio.max(),
+    }
+
+
+def _kc_axis(v, _) -> str:
+    return f"{v / 1000:+.0f} tis.".replace("-", "−") if v else "0"
+
+
+def chart_b2_cashflow(fl: dict, path: Path) -> dict:
+    """Monthly cash flow of the variant B flats: rent − costs − installment."""
+    cf = fl["cf"].iloc[1:]
+    months = fl["months"][1:]
+    tot = cf.sum()
+    series = [
+        (cf[k], f"{B_FLATS[k][0]}\n{kc(cf[k].iloc[-1])} měsíčně, celkem {mil(tot[k])}",
+         B_FLATS[k][1], B_FLATS[k][2])
+        for k in B_FLATS
+    ]  # fmt: skip
+    neg = cf["byt_hypo_najem"] < 0
+    last_neg = cf.index[neg][-1] if neg.any() else None
+    social_image(
+        path,
+        (
+            "Pronajatý byt si hypotéku zaplatil sám,",
+            f"prázdný stál {kc(-cf['byt_hypo'].mean())} měsíčně",
+        ),
+        [
+            f"Měsíční cashflow bytů z varianty B, {qlabel(START_Q)} → {qlabel(END_Q)}: nájem − náklady − splátka.",
+            f"Nájem {pct(GROSS_YIELD, digits=0)} ceny z roku 2016 ročně (1 měsíc v roce prázdný), roste s nájemným v HICP.",
+            f"Náklady (fond oprav, pojištění, daň, opravy) {pct(OWNER_COST, digits=0)} ceny ročně, rostou s inflací.",
+            "Pronajatý byt s hypotékou doplácel"
+            + (f" do {last_neg.strftime('%m/%Y')}, pak byl v plusu." if last_neg else " nikdy.")
+            + f" Prázdný s hypotékou spolkl {mil(-tot['byt_hypo'])}.",
+        ],
+        lambda ax: _line_chart(ax, months, series, gap=4200, yfmt=_kc_axis, fontsize=11),
+        axes_rect=(0.12, 0.17, 0.5, 0.58),
+        source=SOURCE_B,
+    )
+    return {"cf": cf, "tot": tot, "last_neg": last_neg}
 
 
 def chart_c_regions(regions: dict, path: Path) -> dict:
@@ -582,6 +802,9 @@ def chart_c_regions(regions: dict, path: Path) -> dict:
 def chart_d_irr(base: dict, lump: pd.DataFrame, path: Path) -> dict:
     r = base["irr"].sort_values()
     infl = (lump["inflace"].iloc[-1] / lump["inflace"].iloc[0]) ** 0.1 - 1
+    assert r["sporici"] < infl < r.drop("sporici").min(), (
+        "subtitle claims only savings lost to inflation"
+    )
 
     def draw(ax) -> None:
         y = np.arange(len(r))
@@ -590,8 +813,8 @@ def chart_d_irr(base: dict, lump: pd.DataFrame, path: Path) -> dict:
         for i, v in enumerate(r.values):
             ax.text(v * 100 + 0.3, i, pct(v), va="center", fontsize=13, color=INK, weight="bold")
         ax.axvline(infl * 100, color=MUTED, lw=1.4, ls="--")
-        ax.text(infl * 100, len(r) - 0.45, f" inflace {pct(infl)} ročně", color=INK2, fontsize=11,
-                va="bottom")  # fmt: skip
+        ax.text(infl * 100, len(r) - 0.45, f" inflace {pct(infl)} ročně (HICP)", color=INK2,
+                fontsize=11, va="bottom")  # fmt: skip
         _clean(ax, "x")
         ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.0f} %"))
         ax.set_xlim(0, r.max() * 100 * 1.18)
@@ -607,12 +830,36 @@ def chart_d_irr(base: dict, lump: pd.DataFrame, path: Path) -> dict:
             f"Průměrné roční zhodnocení vlastních peněz, {qlabel(START_Q)} → {qlabel(END_Q)}, v korunách.",
             f"Stejné vklady u všech strategií: 1 mil. Kč na začátku + {kc(base['sched']['payment'].iloc[0])} měsíčně (splátka hypotéky).",
             "Výnos počítaný jako vnitřní výnosové procento (IRR) z těchto vkladů a konečné hodnoty.",
-            "U bytu bez nájmu a nákladů, u akcií s reinvestovanými dividendami.",
+            "U bytu bez nájmu a nákladů, u akcií s reinvestovanými dividendami. Spořicí účet: sazby ČNB",
+            "nových vkladů do 1 roku, po 15% dani. Spořák jako jediný prohrál s inflací (2022–23 přes 10 %).",
         ],
         draw,
         axes_rect=(0.3, 0.2, 0.62, 0.55),
     )
     return {"irr": r, "infl": infl}
+
+
+def chart_savings(d: Data, path: Path) -> None:
+    """Methodology chart for the report: household deposit rates used for the savings account."""
+    m = d.dep.loc["2015-01":, ["term_1y", "overnight"]]
+    fig, ax = plt.subplots(figsize=(9, 4.2), dpi=110)
+    x = m.index.to_timestamp()
+    ax.plot(
+        x,
+        m["term_1y"],
+        color=STRATEGIES["sporici"][1],
+        lw=2,
+        label="nové vklady do 1 roku (základ)",
+    )
+    ax.plot(x, m["overnight"], color=MUTED, lw=2, ls="--", label="vklady na požádání (dolní odhad)")
+    _clean(ax)
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:.0f} %"))
+    ax.legend(frameon=False, fontsize=9)
+    ax.set_title("Úrokové sazby vkladů domácností v Kč (ČNB), před daní", fontsize=10.5, loc="left",
+                 color=INK2)  # fmt: skip
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
 
 
 def chart_rates(d: Data, path: Path) -> None:
@@ -640,16 +887,23 @@ def chart_rates(d: Data, path: Path) -> None:
 # --------------------------------------------------------------------------------------------
 
 
-def post_texts(base: dict, lump: pd.DataFrame, regions: dict, rob: pd.DataFrame, k: dict) -> dict:
+def post_texts(base: dict, lump: pd.DataFrame, regions: dict, rob: pd.DataFrame, k: dict,
+               fb: dict, infl: pd.DataFrame) -> dict:  # fmt: skip
     f, total_in = base["final"], base["total_in"]
     pay = base["sched"]["payment"].iloc[0]
-    end = k["B"]["end"]
     irr_ = k["D"]["irr"]
     fl = base["prices"]["byt"]
     flat_x = fl.iloc[-1] / fl.iloc[0]
     rent3 = rob.loc["S čistým nájmem 3 % ročně"]
     fix10 = rob.iloc[1]
     m, p = regions["mimo"], regions["praha"]
+    w = k["B"]["wealth_end"]
+    cf, tot = k["B2"]["cf"], k["B2"]["tot"]
+    infl_y = (lump["inflace"].iloc[-1] / OWN) ** 0.1 - 1
+    hicp = infl["HICP (Eurostat/ČSÚ)"]
+    calm = hicp.drop(["5/2021 → 5/2022", "5/2022 → 5/2023"])
+    calm_y = (1 + calm).prod() ** (1 / len(calm)) - 1
+    sav_y = (lump["sporici"].iloc[-1] / OWN) ** 0.1 - 1
     return {
         "A": (
             f"Kdo v roce 2016 koupil byt na hypotéku, má dnes víc než ten, kdo stejné peníze dal do amerických akcií nebo do zlata. A to výrazně.\n\n"
@@ -659,10 +913,22 @@ def post_texts(base: dict, lump: pd.DataFrame, regions: dict, rob: pd.DataFrame,
             "Jenže páka funguje oběma směry. Těchto 10 let bylo pro byty výjimečných: levné úvěry na začátku a ceny skoro bez poklesu. S dnešními sazbami kolem 5 % a cenami na rekordu je výchozí bod úplně jiný."
         ),
         "B": (
-            f"Milion korun vložený v roce 2016 jednorázově, bez hypotéky. Kolik je to dnes? Akcie S&P 500 {mil(lump['sp500'].iloc[-1])}, zlato {mil(lump['zlato'].iloc[-1])}, průměrný byt v ČR {mil(lump['byt'].iloc[-1])}.\n\n"
-            f"Skoro remíza. Americké akcie by přitom v dolarech vydělaly víc ({times(end['sp500_usd'])}), ale koruna k dolaru posílila o {pct(1 - lump['usd'].iloc[-1] / lump['usd'].iloc[0], digits=0)} a část zisku smazala.\n\n"
-            f"Pro srovnání: kvůli inflaci dnes potřebujete {mil(lump['inflace'].iloc[-1])}, abyste koupili totéž, co za milion v roce 2016. Všechny tři investice inflaci porazily s velkou rezervou.\n\n"
-            "Rozdíl mezi bytem a akciemi tedy nedělá samotný byt, ale to, jak se kupuje. Byt si většina lidí kupuje na úvěr — a to je ta páka, která rozhoduje."
+            f"Milion korun v roce 2016. Kam s ním? Dnes by z něj bylo: pronajatý byt s 80% hypotékou {mil(w['byt_hypo_najem'])}, prázdný byt s hypotékou {mil(w['byt_hypo'])}, akcie S&P 500 {mil(lump['sp500'].iloc[-1])}, pronajatý byt bez hypotéky {mil(w['byt_najem'])}, zlato {mil(lump['zlato'].iloc[-1])}, prázdný byt bez hypotéky {mil(w['byt'])} a spořicí účet {mil(lump['sporici'].iloc[-1])}.\n\n"
+            f"U bytů je všechno započtené: cena bytu, zbývající dluh, nájem, náklady i splátky. Kdo měl byt na hypotéku prázdný, musel za 10 let doplatit z vlastní kapsy {mil(-tot['byt_hypo'])} — a i tak vyšel lépe než akcie. Pronajatý byt si splátky pokryl nájmem.\n\n"
+            f"Spořicí účet jako jediný prohrál s inflací: vynášel po dani {pct(sav_y)} ročně, ceny rostly o {pct(infl_y)} ročně. Na stejný nákup jako za milion v roce 2016 dnes potřebujete {mil(lump['inflace'].iloc[-1])}.\n\n"
+            "Bez hypotéky skončily byt, akcie i zlato podobně. Rozdíl udělala levná hypotéka — a ta dnes stojí dvakrát víc."
+        ),
+        "B2": (
+            f"Byt na hypotéku vypadá v grafech skvěle. Jak ale vypadala peněženka měsíc po měsíci?\n\n"
+            f"Prázdný byt s 80% hypotékou (cena {mil(fb['big'], 0)}) stál majitele v průměru {kc(-cf['byt_hypo'].mean())} měsíčně: splátku a náklady na fond oprav, pojištění, daň a opravy. Za 10 let {mil(-tot['byt_hypo'])}.\n\n"
+            f"Pronajatý byt na tom byl úplně jinak. Nájem kolem {pct(GROSS_YIELD, digits=0)} ceny ročně na začátku zhruba pokryl splátku i náklady"
+            + (
+                f", od {k['B2']['last_neg'].strftime('%m/%Y')} byl každý měsíc v plusu"
+                if k["B2"]["last_neg"] is not None
+                else ""
+            )
+            + f" a dnes vydělává {kc(cf['byt_hypo_najem'].iloc[-1])} měsíčně. Celkem za 10 let {mil(tot['byt_hypo_najem'])}.\n\n"
+            "Pozor na dnešek: s hypotékou kolem 5 % a nižším výnosem z nájmu by stejný byt začínal s cashflow hluboko v minusu. Než koupíte, spočítejte si, kolik budete měsíčně doplácet."
         ),
         "C": (
             f"Byty mimo Prahu zdražily za 10 let {times(m['prices']['byt'].iloc[-1] / m['prices']['byt'].iloc[0])}, pražské „jen“ {times(p['prices']['byt'].iloc[-1] / p['prices']['byt'].iloc[0])}.\n\n"
@@ -671,7 +937,8 @@ def post_texts(base: dict, lump: pd.DataFrame, regions: dict, rob: pd.DataFrame,
             "Jako pronajímatel se při další koupi ptejte, jestli bude cena i nájem v daném městě dál růst. Minulých 10 let to platilo skoro všude, to ale není zákon."
         ),
         "D": (
-            f"Byt koupený v roce 2016 s 80% hypotékou vynášel vlastním penězům v průměru {pct(irr_['byt_hypo'])} ročně. Akcie S&P 500 {pct(irr_['sp500'])}, zlato {pct(irr_['zlato'])}, byt bez hypotéky {pct(irr_['byt'])}. Inflace byla {pct(k['D']['infl'])} ročně.\n\n"
+            f"Byt koupený v roce 2016 s 80% hypotékou vynášel vlastním penězům v průměru {pct(irr_['byt_hypo'])} ročně. Akcie S&P 500 {pct(irr_['sp500'])}, zlato {pct(irr_['zlato'])}, byt bez hypotéky {pct(irr_['byt'])}, spořicí účet po dani {pct(irr_['sporici'])}.\n\n"
+            f"Inflace byla {pct(k['D']['infl'])} ročně. Vysoké číslo dělají hlavně roky 2022 a 2023 (od května do května {pct(hicp['5/2021 → 5/2022'])} a {pct(hicp['5/2022 → 5/2023'])}); bez nich by to bylo {pct(calm_y)} ročně. Spořicí účet tak jako jediný reálně ztrácel.\n\n"
             f"U bytu přitom nepočítáme nájem. Kdyby čistý nájem (po nákladech a neobsazenosti) dělal 3 % ceny ročně, byl by výnos bytu na hypotéku {pct(rent3['irr_hypo'])} ročně.\n\n"
             f"Výsledek nestojí na detailech: s desetiletou fixací by to bylo {pct(fix10['irr_hypo'])}, s 4% náklady na koupi bytu {pct(rob.loc['Náklady na koupi bytu 4 % ceny', 'irr_hypo'])}.\n\n"
             "Je to ale ohlédnutí za výjimečnou dekádou. Stejný výpočet pro příštích 10 let začíná s dvojnásobnou sazbou a o třetinu nižším výnosem z nájmu. Páka zvětšuje zisky i ztráty."
@@ -703,9 +970,10 @@ def _table(df: pd.DataFrame, fmt: dict[str, Callable]) -> str:
 
 
 def write_report(out: Path, ctx: dict) -> None:
-    d, base, lump, regions, rob, posts, k, imgs, raw, chk = (
-        ctx[x] for x in ("d", "base", "lump", "regions", "rob", "posts", "k", "imgs", "raw", "chk")
-    )
+    d, base, lump, regions, rob, posts, k, imgs, raw, chk, fb, rob_b, infl = (
+        ctx[x] for x in ("d", "base", "lump", "regions", "rob", "posts", "k", "imgs", "raw", "chk",
+                         "fl", "rob_b", "infl")
+    )  # fmt: skip
     f, total_in, sched = base["final"], base["total_in"], base["sched"]
     pay0, pay1 = sched["payment"].iloc[0], sched["payment"].iloc[-1]
     interest = sched["interest"].sum()
@@ -740,6 +1008,11 @@ def write_report(out: Path, ctx: dict) -> None:
          d.gold.to_frame("USD/oz"), d.gold.loc["2016-05":]),
         ("Eurostat — HICP Česko (data ČSÚ), 2015 = 100: celkem (TOTAL) a skutečné nájemné (CP041)",
          URL_HICP, d.hicp, d.hicp.loc["2016-05":, "TOTAL"]),
+        ("ČNB — úrokové sazby nových vkladů domácností v CZK (MIR), měsíčně, přes ECB Data Portal: vklady splatné na požádání "
+         "(overnight) a vklady se splatností do 1 roku (term_1y); G, H = 1–2 roky, nad 2 roky", URL_DEP, d.dep,
+         d.dep.loc["2016-05":, "term_1y"]),
+        ("ČSÚ — Indexy spotřebitelských cen (CPI, 010022), celkem, měsíčně, průměr 2015 = 100 (kontrola inflace HICP)",
+         URL_CPI, d.cpi.to_frame("CPI"), d.cpi.loc["2016-05":]),
         ("FRED — S&P 500 denní uzávěrky (jen kontrola Shillerovy řady)", URL_FRED,
          d.fred.to_frame("SP500"), d.fred),
     ]  # fmt: skip
@@ -790,20 +1063,48 @@ variantách (modrá byt s hypotékou, oranžová akcie, tyrkysová byt bez hypot
 </ul>
 {_post(posts["A"])}
 
-<h2>Varianta B — jednorázový milion bez hypotéky</h2>
+<h2>Varianta B — jednorázový milion: byty (pronajaté i prázdné, s hypotékou i bez), akcie, zlato, spořicí účet</h2>
 {_img(imgs["B"])}
 <h3>Jak graf vznikl</h3>
 <ul>
-<li><b>Výpočet:</b> 1 mil. Kč × (cena v květnu 2026 / cena v květnu 2016), bez dalších vkladů. Byt = index ČSÚ ČR.</li>
-<li><b>Inflace:</b> HICP Česko (Eurostat, data ČSÚ) — kolik korun je potřeba dnes na koupi toho, co stálo 1 mil. Kč v roce 2016.</li>
+<li><b>Vklad:</b> jednorázově 1 mil. Kč v květnu 2016, dál už nic. Akcie, zlato a spořicí účet: 1 mil. Kč × (hodnota v květnu 2026 / hodnota v květnu 2016).</li>
+<li><b>Byt bez hypotéky:</b> byt za 1 mil. Kč (podíl průměrného bytu podle indexu ČSÚ ČR). <b>Byt s hypotékou:</b> 1 mil. Kč = 20% akontace → byt za {mil(fb["big"])},
+úvěr {mil(fb["big"] * 0.8)} na 30 let, stejná sazba a refixace jako ve variantě A (splátka {kc(fb["sched"]["payment"].iloc[0])}, po refixaci {kc(fb["sched"]["payment"].iloc[-1])}).</li>
+<li><b>Pronajatý byt:</b> hrubý nájem {pct(GROSS_YIELD, digits=0)} ceny z roku 2016 ročně, 1 měsíc v roce prázdný (čistý příjem {pct(GROSS_YIELD * (1 - VACANCY))} ceny), nájem dál roste podle indexu
+skutečného nájemného HICP (CP041, +{pct(d.hicp["CP041"].loc[mid_month(END_Q)] / d.hicp["CP041"].loc[mid_month(START_Q)] - 1, digits=0)} za 10 let). U bytu s hypotékou to dělá
+{kc(fb["rent_big"].iloc[1])} měsíčně na začátku a {kc(fb["rent_big"].iloc[-1])} na konci.</li>
+<li><b>Náklady vlastníka</b> (fond oprav, pojištění, daň z nemovitosti, drobné opravy): {pct(OWNER_COST, digits=0)} ceny z roku 2016 ročně, rostou s inflací HICP; platí pro pronajaté i prázdné byty.
+U bytu s hypotékou {kc(fb["costs_big"].iloc[1])} měsíčně na začátku.</li>
+<li><b>Výsledek bytů</b> = cena bytu podle indexu ČSÚ − zbývající dluh + součet měsíčního cashflow (nájem − náklady − splátka). Záporné cashflow (doplatky z vlastní kapsy) se
+odečítá bez úroku, kladné se hromadí jako hotovost bez úroku. Doplatky tedy nejsou „zadarmo“, ale nepočítáme, že by je investor jinak mohl investovat — proto je férovější
+srovnání se stejnými vklady ve variantách A a D.</li>
+<li><b>Spořicí účet:</b> měsíční úročení průměrnou sazbou ČNB pro nové vklady domácností se splatností do 1 roku, po 15% srážkové dani (viz sekce Spořicí účet).</li>
+<li><b>Inflace:</b> HICP Česko — kolik korun je potřeba dnes na koupi toho, co stálo 1 mil. Kč v roce 2016 (podrobně v sekci Inflace).</li>
 <li><b>Kurzový efekt:</b> S&amp;P 500 v dolarech {times(k["B"]["end"]["sp500_usd"])}, v korunách {times(k["B"]["end"]["sp500"])};
 zlato v dolarech {times(k["B"]["end"]["zlato_usd"])}, v korunách {times(k["B"]["end"]["zlato"])}.
 Bez dividend by S&amp;P 500 v korunách dalo {times(k["B"]["end"]["sp500_price"])}.</li>
 <li><b>Riziko po cestě (max. propad v měsíčních datech):</b> S&amp;P 500 v Kč {pct(mdd["sp500"], digits=0)}, zlato {pct(mdd["zlato"], digits=0)},
 byt {pct(mdd["byt"], digits=0)}. Pozor: index bytů je čtvrtletní průměr transakcí, propady proto vypadají menší, než by byla
 skutečná kolísavost ceny jednoho bytu.</li>
+<li><b>Graf:</b> čárový; pronajaté byty plnou čarou, prázdné tečkovaně ve stejné barvě (modrá s hypotékou, tyrkysová bez), fialová spořicí účet, šedá čárkovaná inflace.
+Popisky u konců čar seřazené podle konečné hodnoty.</li>
 </ul>
+<h3>Citlivost varianty B</h3>
+{_table(rob_b, {c: mil for c in rob_b.columns})}
+<p class="note">Výnos z nájmu v roce 2016 je odhad (oficiální řada výnosnosti nájmu v ČR neexistuje). 5 % hrubého je střed běžně uváděného rozpětí
+(Praha kolem 4–5 %, krajská města 5–7 %). Daň z příjmu z nájmu není započtena (s 30% výdajovým paušálem by brala asi 10 % hrubého nájmu).</p>
 {_post(posts["B"])}
+
+<h2>Varianta B2 — měsíční cashflow bytů z varianty B</h2>
+{_img(imgs["B2"])}
+<h3>Jak graf vznikl</h3>
+<ul>
+<li><b>Cashflow</b> = čistý nájem (jen pronajaté) − náklady vlastníka − splátka hypotéky (jen s hypotékou), měsíc po měsíci, stejné předpoklady jako B.</li>
+<li><b>Součty za 10 let:</b> {"; ".join(f"{esc(B_FLATS[c][0])} {mil(k['B2']['tot'][c])}" for c in B_FLATS)}.</li>
+<li><b>Skoky:</b> refixace hypotéky v roce 2021 změnila splátku; nájem roste podle měsíčního indexu nájemného, náklady podle inflace.</li>
+<li><b>Graf:</b> čárový, Kč měsíčně, nulová čára zvýrazněná. Stejné barvy a styly čar jako v B.</li>
+</ul>
+{_post(posts["B2"])}
 
 <h2>Varianta C — Praha vs. zbytek republiky</h2>
 {_img(imgs["C"])}
@@ -823,7 +1124,8 @@ Index „ČR bez Prahy“ pokrývá celou republiku, jednotlivá města se mohou
 <ul>
 <li><b>Výpočet:</b> vnitřní výnosové procento z měsíčních toků: −1 mil. Kč na začátku, −splátka každý měsíc, + konečná hodnota.
 Převedeno na roční (p. a.). Je to číslo srovnatelné s „výnosem fondu“ nebo úrokem na spořicím účtu.</li>
-<li><b>Inflace:</b> průměrná roční inflace HICP za stejné období.</li>
+<li><b>Spořicí účet:</b> měsíční vklady (stejné jako u ostatních) úročené sazbou ČNB nových vkladů do 1 roku, po 15% dani.</li>
+<li><b>Inflace:</b> průměrná roční inflace HICP za stejné období (geometrický průměr; podrobně v sekci Inflace).</li>
 <li><b>Graf:</b> vodorovné sloupce seřazené podle výnosu.</li>
 </ul>
 {_post(posts["D"])}
@@ -840,6 +1142,30 @@ bytu s hypotékou děleno totéž pro S&amp;P 500.</p>
 podle indexu skutečného nájemného HICP (CP041, +{pct(d.hicp["CP041"].loc[mid_month(END_Q)] / d.hicp["CP041"].loc[mid_month(START_Q)] - 1, digits=0)} za 10 let).
 Nájem se jen hromadí na účtu (bez úroku), takže je to spíš dolní odhad.</p>
 <img src="data:image/png;base64,{base64.b64encode(imgs["R"].read_bytes()).decode()}" alt="" style="max-width:720px">
+
+<h2>Inflace — odkud je číslo a proč je tak vysoké</h2>
+<p><b>Zdroj:</b> harmonizovaný index spotřebitelských cen (HICP) za Česko z Eurostatu, datová sada
+<a href="{esc(URL_HICP)}">prc_hicp_minr</a>, položka TOTAL, index 2015 = 100. Data do Eurostatu dodává ČSÚ.
+Kontrola: národní index spotřebitelských cen ČSÚ (<a href="{esc(URL_CPI)}">CPI, datová sada 010022</a>), ze kterého ČSÚ počítá oficiální „míru inflace“.</p>
+<p><b>Výsledek:</b> HICP {dec(d.hicp.loc[mid_month(START_Q), "TOTAL"])} (5/2016) → {dec(d.hicp.loc[mid_month(END_Q), "TOTAL"])} (5/2026), tj. +{pct(lump["inflace"].iloc[-1] / OWN - 1, digits=1)} za 10 let,
+<b>{pct(k["D"]["infl"])} ročně</b>. ČSÚ CPI za stejné období, které má k dispozici (5/2016 → {esc(str(d.cpi.index[-1]))}): {pct(chk["cpi_y"])} ročně, HICP za totéž období {pct(chk["hicp_y"])} ročně — oba indexy se shodují.</p>
+<p><b>Proč tolik:</b> průměr táhnou nahoru dva roky energetické krize. Od května 2021 do května 2023 vzrostly ceny o {pct(chk["shock"], digits=0)}.
+Bez těchto dvou let by průměr byl {pct(chk["calm_y"])} ročně (blízko 2% cíle ČNB), medián ročních hodnot je {pct(infl["HICP (Eurostat/ČSÚ)"].median())}.
+Pocit, že „inflace je normálně kolem 2–3 %“, je správný — jenže v tomto desetiletí byla dvě léta výjimečná a ta se do průměru propisují.</p>
+{_table(infl, {c: (lambda v: pct(v, signed=True)) for c in infl.columns})}
+<p class="note">Sloupec „CPI ČSÚ, průměr roku konce“ je oficiální roční míra inflace ČSÚ (průměr 12 měsíců proti předchozím 12) za rok, ve kterém období končí — to jsou čísla, která se uvádí ve zprávách
+(např. 2022: 15,1 %, 2023: 10,7 %). ČSÚ CPI je v datové sadě zatím do {esc(str(d.cpi.index[-1]))}.</p>
+
+<h2>Spořicí účet — jaká sazba</h2>
+<p>ČNB nezveřejňuje samostatnou průměrnou sazbu spořicích účtů v dlouhé řadě. Použili jsme statistiku úrokových sazeb MFI (ČNB, distribuuje ECB):</p>
+<ul>
+<li><b>Základ: nové vklady domácností se splatností do 1 roku</b> (průměr {pct(d.dep.loc["2016-05":"2026-05", "term_1y"].mean() / 100, digits=2)} p. a. za období, minimum {pct(d.dep.loc["2016-05":"2026-05", "term_1y"].min() / 100, digits=2)}, maximum {pct(d.dep.loc["2016-05":"2026-05", "term_1y"].max() / 100, digits=2)}).
+Odpovídá tomu, co dostal aktivní střadatel, který přecházel za lepším spořicím účtem nebo termínovaným vkladem (v roce 2023 nejlepší spořicí účty kolem 6 %, v polovině 2025 kolem 3 %).</li>
+<li><b>Dolní odhad: vklady splatné na požádání</b> (běžné i spořicí účty dohromady, průměr {pct(d.dep.loc["2016-05":"2026-05", "overnight"].mean() / 100, digits=2)} p. a.). Tak dopadl ten, kdo nechal peníze ležet:
+1 mil. Kč → {mil(lump["sporici_bezny"].iloc[-1], 2)}.</li>
+<li>Úrok se připisuje měsíčně, z úroku se strhává 15% daň. Výsledek základu: 1 mil. Kč → {mil(lump["sporici"].iloc[-1], 2)} ({pct((lump["sporici"].iloc[-1] / OWN) ** 0.1 - 1, digits=2)} ročně po dani).</li>
+</ul>
+<img src="data:image/png;base64,{base64.b64encode(imgs["S"].read_bytes()).decode()}" alt="" style="max-width:720px">
 
 <h2>Datové zdroje</h2>
 {src_html}
@@ -876,11 +1202,11 @@ o 0,2 p. b. ročně, poplatek ETF asi o 0,1 p. b. Daň z nabytí nemovitosti (4 
 <h2>Postup</h2>
 <ol>
 <li>Výběr zdrojů: ČSÚ (realizované, ne nabídkové ceny bytů), ČNB (sazby nových hypoték, kurz), Shiller (jediná volně dostupná měsíční řada
-S&amp;P 500 s dividendami; ověřeno proti FRED), Světová banka (zlato), Eurostat/ČSÚ (inflace, nájemné).</li>
+S&amp;P 500 s dividendami; ověřeno proti FRED), Světová banka (zlato), Eurostat/ČSÚ (inflace, nájemné), ČNB (sazby vkladů pro spořicí účet), ČSÚ CPI (kontrola inflace).</li>
 <li>Stažení skriptem <code>download.py</code> do <code>{esc(str(raw.relative_to(monaco.ROOT)))}</code>.</li>
 <li>Zpracování: převod všeho na měsíční řady v Kč, interpolace čtvrtletního indexu bytů.</li>
 <li>Simulace čtyř strategií se stejnými peněžními toky, výpočet hodnoty v čase a IRR.</li>
-<li>Kandidátní grafy A–D, kontrola robustnosti (14 variant), kontrola zdrojových dat (Shiller vs. FRED).</li>
+<li>Kandidátní grafy A–D (B s byty pronajatými i prázdnými a spořicím účtem, B2 cashflow), kontrola robustnosti, kontrola zdrojových dat (Shiller vs. FRED, HICP vs. CPI ČSÚ).</li>
 <li>Výstupy: obrázky 1080 × 1350 px, texty příspěvků, tento report, data v CSV.</li>
 </ol>
 
@@ -943,8 +1269,21 @@ def main() -> None:
     }
     lump = lump_sum(d)
     rob = robustness(d, base)
+    fl = flat_strategies(d)
+    rob_b = robustness_b(d)
+    infl = inflation_table(d)
     window = pd.period_range("2016-05", "2026-06", freq="M")
-    chk = {"fred_diff": float((d.spx["P"] / d.fred - 1).reindex(window).abs().max())}
+    cpi_end = d.cpi.index[-1]
+    yrs = (cpi_end - mid_month(START_Q)).n / 12
+    hicp = d.hicp["TOTAL"]
+    calm = infl["HICP (Eurostat/ČSÚ)"].drop(["5/2021 → 5/2022", "5/2022 → 5/2023"])
+    chk = {
+        "fred_diff": float((d.spx["P"] / d.fred - 1).reindex(window).abs().max()),
+        "cpi_y": (d.cpi[cpi_end] / d.cpi[mid_month(START_Q)]) ** (1 / yrs) - 1,
+        "hicp_y": (hicp[cpi_end] / hicp[mid_month(START_Q)]) ** (1 / yrs) - 1,
+        "shock": hicp[pd.Period("2023-05", "M")] / hicp[pd.Period("2021-05", "M")] - 1,
+        "calm_y": (1 + calm).prod() ** (1 / len(calm)) - 1,
+    }
     mdd = {k_: max_drawdown(lump[k_]) for k_ in ("sp500", "zlato", "byt")}
 
     (out / "data").mkdir()
@@ -953,23 +1292,31 @@ def main() -> None:
     base["sched"].to_csv(out / "data" / "hypoteka_splatky.csv")
     lump.to_csv(out / "data" / "jednorazove_1mil.csv")
     rob.to_csv(out / "data" / "robustnost.csv")
+    fl["wealth"].to_csv(out / "data" / "B_byty_vysledek_mesicne.csv")
+    fl["cf"].to_csv(out / "data" / "B2_byty_cashflow_mesicne.csv")
+    rob_b.to_csv(out / "data" / "B_robustnost.csv")
+    infl.to_csv(out / "data" / "inflace_po_letech.csv")
     base["prices"].to_csv(out / "data" / "ceny_kc_mesicne.csv")
 
     imgs = {
         "A": out / "A_investice_v_case.png",
-        "B": out / "B_jednorazove_bez_hypoteky.png",
+        "B": out / "B_jednorazove_1mil.png",
+        "B2": out / "B2_cashflow_bytu.png",
         "C": out / "C_praha_vs_regiony.png",
         "D": out / "D_rocni_vynos.png",
         "R": out / "metodika_sazby_hypotek.png",
+        "S": out / "metodika_sazby_vkladu.png",
     }
     k = {
         "A": chart_a_wealth(base, imgs["A"]),
-        "B": chart_b_lump(lump, base["months"], imgs["B"]),
+        "B": chart_b_lump(lump, fl, imgs["B"]),
+        "B2": chart_b2_cashflow(fl, imgs["B2"]),
         "C": chart_c_regions(regions, imgs["C"]),
         "D": chart_d_irr(base, lump, imgs["D"]),
     }
     chart_rates(d, imgs["R"])
-    posts = post_texts(base, lump, regions, rob, k)
+    chart_savings(d, imgs["S"])
+    posts = post_texts(base, lump, regions, rob, k, fl, infl)
     (out / "texty_prispevku.md").write_text(
         "\n\n".join(f"## Varianta {v}\n\n{t}" for v, t in posts.items()) + "\n", encoding="utf-8"
     )
@@ -987,6 +1334,9 @@ def main() -> None:
             "raw": raw,
             "chk": chk,
             "mdd": mdd,
+            "fl": fl,
+            "rob_b": rob_b,
+            "infl": infl,
         },
     )
     print(rob.round(3).to_string())
