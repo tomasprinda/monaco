@@ -1,5 +1,10 @@
 # CLAUDE.md
 
+## Git
+
+- After finishing each prompt, commit all resulting changes with a descriptive message and push
+  to the remote.
+
 ## Data and outputs
 
 - The repo root must contain two directories: `data/` (input data) and `outputs/` (generated
