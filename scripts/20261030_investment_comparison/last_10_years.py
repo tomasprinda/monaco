@@ -30,7 +30,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from matplotlib.ticker import FuncFormatter
-from matplotlib.transforms import ScaledTranslation
+from matplotlib.transforms import ScaledTranslation, blended_transform_factory
 
 import monaco
 
@@ -973,6 +973,119 @@ def chart_b6_hypo_parts(fl: dict, path: Path) -> dict:
     return res
 
 
+NEG, POS = "#e34948", "#2a78d6"  # diverging pair: topping up / surplus
+
+
+def chart_b7_hypo_time(fl: dict, path: Path) -> dict:
+    """Rented flat with a mortgage over time: monthly rent vs. installment + costs (the gap is the
+    cash flow), and below the value of the investment from the 1 mil. Kč put in to today."""
+    k = "byt_hypo_najem"
+    m = fl["months"][1:]
+    x = m.to_timestamp()
+    rent = fl["rent_big"].loc[m]
+    pay = fl["sched"]["payment"].loc[m]
+    out_ = pay + fl["costs_big"].loc[m]
+    cf = fl["cf"][k].loc[m]
+    neg = cf < 0
+    last_neg = cf.index[neg][-1]
+    assert neg.iloc[0] and not neg.loc[last_neg + 1 :].any(), "title: negative, then positive"
+    years_neg = round((last_neg - m[0]).n / 12)
+    topped_up, surplus = -cf[neg].sum(), cf[~neg].sum()
+    debt = fl["sched"]["balance"].reindex(fl["months"]).fillna(fl["big"] * 0.8)
+    price = fl["equity"][k] + debt
+    wealth = fl["wealth"][k]
+    xa = fl["months"].to_timestamp()
+
+    def end_labels(ax, labels: list[tuple[float, str]], gap: float) -> None:
+        ys = _spread([y for y, _ in labels], gap)
+        shift = ax.transData + ScaledTranslation(10 / 72, 0, ax.figure.dpi_scale_trans)
+        for (_, text), ly in zip(labels, ys, strict=True):
+            ax.text(xa[-1], ly, text, transform=shift, va="center", fontsize=11, color=INK,
+                    linespacing=1.3)  # fmt: skip
+
+    def panel_title(ax, text: str) -> None:
+        ax.text(0.06, 1.08, text, fontsize=14, weight="bold", color=INK,
+                transform=blended_transform_factory(ax.figure.transFigure, ax.transAxes))  # fmt: skip
+
+    def time_axis(ax) -> None:
+        _clean(ax)
+        ax.tick_params(labelsize=11)
+        ax.set_xlim(xa[0], xa[-1])
+        ax.xaxis.set_major_locator(plt.matplotlib.dates.YearLocator(2))
+        ax.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter("%Y"))
+
+    def flows(ax) -> None:
+        ax.fill_between(x, rent, out_, where=(out_ >= rent).values, interpolate=True, color=NEG,
+                        alpha=0.35, lw=0)  # fmt: skip
+        ax.fill_between(x, rent, out_, where=(rent >= out_).values, interpolate=True, color=POS,
+                        alpha=0.35, lw=0)  # fmt: skip
+        ax.plot(x, out_.values, color=INK2, lw=2.2)
+        ax.plot(x, pay.values, color=INK2, lw=1.4, ls=":")
+        ax.plot(x, rent.values, color=PARTS["rent"][1], lw=2.6)
+        time_axis(ax)
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v / 1000:.0f} tis."))
+        lo, hi = pay.min(), max(rent.max(), out_.max())
+        ax.set_ylim(lo - (hi - lo) * 0.1, hi + (hi - lo) * 0.05)
+        # Cash-flow callouts in the empty space above the deficit and below the surplus.
+        ax.text(xa[0] + pd.Timedelta(days=200), hi - (hi - lo) * 0.12,
+                f"Doplácelo se {years_neg} let:\nzpočátku {kc(-cf.iloc[0])} měsíčně,\n"
+                f"celkem {kc(topped_up)}", va="top", fontsize=11.5, color=NEG, weight="bold",
+                linespacing=1.35)  # fmt: skip
+        ax.text(pd.Timestamp("2025-06-01"), pay.iloc[-1] + (hi - lo) * 0.1,
+                f"Pak v plusu: dnes {kc(cf.iloc[-1])}\nměsíčně, celkem {kc(surplus)}", ha="right",
+                va="bottom", fontsize=11.5, color=POS, weight="bold", linespacing=1.35)  # fmt: skip
+        end_labels(ax, [(rent.iloc[-1], f"Nájem {kc(rent.iloc[-1])}"),
+                        (out_.iloc[-1], f"Splátka + náklady\n{kc(out_.iloc[-1])}"),
+                        (pay.iloc[-1], f"z toho splátka\n{kc(pay.iloc[-1])}")],
+                   gap=(hi - lo) * 0.2)  # fmt: skip
+        panel_title(ax, "Měsíčně: nájem proti splátce a nákladům (rozdíl = cashflow)")
+
+    def value(ax) -> None:
+        ax.plot(xa, price.values, color=PARTS["growth"][1], lw=1.8)
+        ax.plot(xa, debt.values, color=NEG, lw=1.8, ls="--")
+        ax.plot(xa, wealth.values, color=INK, lw=2.8, solid_capstyle="round")
+        for xi, yi in ((xa[0], wealth.iloc[0]), (xa[-1], wealth.iloc[-1])):
+            ax.plot([xi], [yi], "o", color=INK, ms=9, mec=SURFACE, mew=2, zorder=5, clip_on=False)
+        ax.annotate(f"vklad {mil(OWN)}", (xa[0], wealth.iloc[0]),
+                    xytext=(xa[0] + pd.Timedelta(days=90), price.max() * 0.19), va="center",
+                    fontsize=11.5, weight="bold", color=INK,
+                    arrowprops={"arrowstyle": "-", "color": INK2, "lw": 1})  # fmt: skip
+        time_axis(ax)
+        ax.yaxis.set_major_formatter(FuncFormatter(_mil_axis))
+        ax.set_ylim(0, price.max() * 1.08)
+        end_labels(ax, [(price.iloc[-1], f"Cena bytu {mil(price.iloc[-1])}"),
+                        (wealth.iloc[-1], f"Hodnota investice\n{mil(wealth.iloc[-1])}"),
+                        (debt.iloc[-1], f"Dluh {mil(debt.iloc[-1])}")],
+                   gap=price.max() * 0.13)  # fmt: skip
+        panel_title(ax, "Hodnota investice: cena bytu − dluh + cashflow")
+
+    def draw(ax) -> None:
+        ax.set_axis_off()
+        flows(ax.inset_axes([0, 0.56, 1, 0.38]))
+        value(ax.inset_axes([0, 0, 1, 0.38]))
+
+    sched = fl["sched"]
+    social_image(
+        path,
+        (
+            f"Prvních {years_neg} let se k bytu doplácelo,",
+            f"z milionu je dnes {mil(wealth.iloc[-1])}",
+        ),
+        [
+            f"Pronajatý byt za {mil(fl['big'], 0)} koupený v {qlabel(START_Q)} s 80% hypotékou, vklad 1 mil. Kč (varianta B).",
+            f"Splátka {kc(sched['payment'].iloc[0])} (sazba {pct(sched['rate'].iloc[0])}, od 2021 {pct(sched['rate'].iloc[-1])}) zůstává skoro stejná, nájem roste",
+            f"s nájemným v HICP. Nájem {pct(GROSS_YIELD)} ceny z roku 2016 ročně (1 měsíc prázdný), náklady",
+            f"{pct(OWNER_COST, digits=0)} ceny ročně, rostou s inflací. Hodnota investice = cena bytu (index ČSÚ) − dluh",
+            "+ součet cashflow (doplatky odečtené, přebytky přičtené bez úroku).",
+        ],
+        draw,
+        axes_rect=(0.1, 0.13, 0.6, 0.62),
+        source=SOURCE_B,
+    )
+    return {"years_neg": years_neg, "last_neg": last_neg, "topped_up": topped_up,
+            "surplus": surplus, "wealth": wealth.iloc[-1]}  # fmt: skip
+
+
 def chart_c_regions(regions: dict, path: Path) -> dict:
     rows = []
     for reg, label in (("mimo", "mimo Prahu"), ("cr", "průměr ČR"), ("praha", "Praha")):
@@ -1219,6 +1332,12 @@ def post_texts(base: dict, regions: dict, rob: pd.DataFrame, k: dict, infl: pd.D
             "Nájem tedy pokryl náklady i úroky, ale velký zisk přišel z ceny bytu — a ten uvidíte až při prodeji. Hypotéka ho znásobila, protože růst ceny dostáváte z celé ceny bytu, ne jen z vlastních peněz.\n\n"
             "Kdo dnes kupuje kvůli nájmu, měl by si spočítat, jak by investice dopadla, kdyby cena bytu nerostla."
         ),
+        "B7": (
+            f"Jak vypadá pronajatý byt na hypotéku měsíc po měsíci? V roce 2016 milion vlastních peněz jako 20% akontace na byt za {mil(fb['big'], 0)}, zbytek hypotéka se splátkou {kc(fb['sched']['payment'].iloc[0])}.\n\n"
+            f"Na začátku nájem na splátku a náklady nestačil: {k['B7']['years_neg']} let se doplácelo, zpočátku {kc(-cf['byt_hypo_najem'].iloc[0])} měsíčně, celkem {kc(k['B7']['topped_up'])}. Splátka ale zůstávala skoro stejná, zatímco nájem rostl. Od {(k['B7']['last_neg'] + 1).strftime('%m/%Y')} je byt v plusu a dnes zbývá {kc(cf['byt_hypo_najem'].iloc[-1])} měsíčně. Přebytky zatím dohromady {kc(k['B7']['surplus'])}.\n\n"
+            f"Mezitím se z milionu stalo {mil(k['B7']['wealth'])}: cena bytu vzrostla na {mil(fb['equity']['byt_hypo_najem'].iloc[-1] + fb['sched']['balance'].iloc[-1])} a dluh klesl na {mil(fb['sched']['balance'].iloc[-1])}.\n\n"
+            "Hypotéka na pronajatý byt tak ze začátku stojí peníze z vlastní kapsy. Než koupíte, spočítejte si, kolik let a kolik měsíčně budete doplácet — a jestli to vydržíte, i kdyby nájem rostl pomaleji."
+        ),
         "C": (
             f"Byty mimo Prahu zdražily za 10 let {times(m['fl']['equity']['byt_najem'].iloc[-1] / OWN)}, pražské „jen“ {times(p['fl']['equity']['byt_najem'].iloc[-1] / OWN)}.\n\n"
             f"S 80% hypotékou se ten rozdíl zvětší. Kdo v roce 2016 dal milion jako akontaci na pronajatý byt mimo Prahu, má dnes po odečtení dluhu a se započtením nájmu, nákladů a splátek {mil(m['final']['byt_hypo_najem'])}. V Praze {mil(p['final']['byt_hypo_najem'])}. Stejný milion v akciích S&P 500 je dnes {mil(w['sp500'])}.\n\n"
@@ -1437,6 +1556,21 @@ u zisku celkem průměrné roční zhodnocení vkladu (jako E). Stejná čísla 
 </ul>
 {_post(posts["B6"])}
 
+<h2>Varianta B7 — pronajatý byt s hypotékou v čase: cashflow a hodnota investice</h2>
+{_img(imgs["B7"])}
+<h3>Jak graf vznikl</h3>
+<ul>
+<li><b>Jen pronajatý byt s 80% hypotékou</b>, stejná čísla a předpoklady jako B a B2.</li>
+<li><b>Horní graf (Kč měsíčně):</b> nájem (po odečtení prázdného měsíce), výdaje = splátka + náklady vlastníka, tečkovaně samotná splátka.
+Plocha mezi nájmem a výdaji je měsíční cashflow: červeně doplácení (do {k["B7"]["last_neg"].strftime("%m/%Y")}, celkem {kc(k["B7"]["topped_up"])}),
+modře přebytek (celkem {kc(k["B7"]["surplus"])}). Skok v roce 2021 = refixace hypotéky.</li>
+<li><b>Dolní graf (mil. Kč):</b> cena bytu podle indexu ČSÚ, zbývající dluh a hodnota investice = cena − dluh + součet cashflow (= výsledek bytu z B).
+Začíná vkladem 1 mil. Kč, končí na {mil(k["B7"]["wealth"])}.</li>
+<li><b>Proč dva grafy:</b> měsíční toky (tisíce Kč) a hodnota bytu (miliony Kč) mají jiné měřítko; jedna osa by toky zploštila, dvě osy by byly zavádějící.</li>
+<li><b>Barvy:</b> nájem oranžově a cena bytu modře jako v B3–B6, doplácení/přebytek jako divergentní pár červená/modrá.</li>
+</ul>
+{_post(posts["B7"])}
+
 <h2>Varianta C — Praha vs. zbytek republiky</h2>
 {_img(imgs["C"])}
 <h3>Jak graf vznikl</h3>
@@ -1562,7 +1696,7 @@ S&amp;P 500 s dividendami; ověřeno proti FRED), Světová banka (zlato), Euros
 <li>Stažení skriptem <code>download.py</code> do <code>{esc(str(raw.relative_to(monaco.ROOT)))}</code>.</li>
 <li>Zpracování: převod všeho na měsíční řady v Kč, interpolace čtvrtletního indexu bytů.</li>
 <li>Výpočet pěti strategií pro jednorázový 1 mil. Kč: hodnota v čase, měsíční cashflow pronajatých bytů, roční výnos (IRR).</li>
-<li>Kandidátní grafy B, B2, B3, B4, B5, B6, C, D, E (varianta A se stejnými měsíčními vklady byla vyřazena), kontrola robustnosti (15 variant), kontrola zdrojových dat (Shiller vs. FRED, HICP vs. CPI ČSÚ).</li>
+<li>Kandidátní grafy B, B2, B3, B4, B5, B6, B7, C, D, E (varianta A se stejnými měsíčními vklady byla vyřazena), kontrola robustnosti (15 variant), kontrola zdrojových dat (Shiller vs. FRED, HICP vs. CPI ČSÚ).</li>
 <li>Výstupy: obrázky 1080 × 1350 px, texty příspěvků, tento report, data v CSV.</li>
 </ol>
 
@@ -1657,6 +1791,7 @@ def main() -> None:
         "B4": out / "B4_zdroje_zisku.png",
         "B5": out / "B5_rust_ceny_vs_najem.png",
         "B6": out / "B6_byt_s_hypotekou_zdroje_zisku.png",
+        "B7": out / "B7_byt_s_hypotekou_v_case.png",
         "C": out / "C_praha_vs_regiony.png",
         "D": out / "D_rocni_vynos.png",
         "E": out / "E_hodnota_a_zisk_rocne.png",
@@ -1670,6 +1805,7 @@ def main() -> None:
         "B4": chart_b4_parts(base["fl"], imgs["B4"]),
         "B5": chart_b5_parts_bars(base["fl"], imgs["B5"]),
         "B6": chart_b6_hypo_parts(base["fl"], imgs["B6"]),
+        "B7": chart_b7_hypo_time(base["fl"], imgs["B7"]),
         "C": chart_c_regions(regions, imgs["C"]),
         "D": chart_d_irr(base, imgs["D"]),
         "E": chart_e_value(base, imgs["E"]),
