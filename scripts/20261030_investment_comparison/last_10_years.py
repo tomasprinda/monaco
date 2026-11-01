@@ -892,12 +892,11 @@ def chart_b5_parts_bars(fl: dict, path: Path) -> dict:
         for yi, label, val, _, sh in rows:
             x = max(val, 0) + dx
             sign = "+" if val > 0 and label != "Zisk celkem" else ""
-            if sh is None:
-                ax.text(x, yi, mil(val), va="center", fontsize=12.5, color=INK, weight="bold")
-                continue
+            note = (f"{pct(sh, digits=0)} zisku" if sh is not None
+                    else f"{pct(per_year(OWN + val, fl['months']))} ročně z vkladu")  # fmt: skip
             ax.text(x, yi + 0.02, sign + mil(val), va="bottom", fontsize=12.5, color=INK,
                     weight="bold")  # fmt: skip
-            ax.text(x, yi - 0.02, f"{pct(sh, digits=0)} zisku", va="top", fontsize=11, color=INK2)
+            ax.text(x, yi - 0.02, note, va="top", fontsize=11, color=INK2)
         price = {"byt_hypo_najem": mil(fl["big"], 0), "byt_najem": mil(OWN, 0)}
         bounds = [g[0] for g in groups] + [-np.inf]
         for (gy, k), below in zip(groups, bounds[1:], strict=True):
@@ -923,9 +922,10 @@ def chart_b5_parts_bars(fl: dict, path: Path) -> dict:
             "části se sčítají na 100 %. Obě varianty bytu ve stejném měřítku.",
             f"Nájem {pct(GROSS_YIELD)} ceny ročně (1 měsíc prázdný), náklady vlastníka {pct(OWNER_COST, digits=0)} ceny ročně.",
             "Splacená jistina není náklad — zůstává v hodnotě bytu, počítají se jen úroky.",
+            "U zisku celkem průměrné roční zhodnocení vkladu 1 mil. Kč (složeně, jako ve variantě E).",
         ],
         draw,
-        axes_rect=(0.3, 0.12, 0.6, 0.64),
+        axes_rect=(0.3, 0.12, 0.6, 0.62),
         source=SOURCE_B,
     )
     return {"end": end, "share": share}
@@ -1374,6 +1374,8 @@ na jedné ose (stejné měřítko), aby byl vidět i efekt hypotéky.</li>
 <li><b>Relativní hodnota = podíl na zisku celkem</b> (hodnota dnes − vložený 1 mil. Kč); části se sčítají na 100 %, náklady a úroky jsou záporné.
 Podíl vůči vloženému milionu jsme nepoužili — byl by číselně stejný jako částka v mil. Kč. Podíl na příjmech (bez nákladů) je v textu B4.</li>
 <li><b>Podíly:</b> {"; ".join(f"{esc(STRATEGIES[c][0])}: " + ", ".join(f"{esc(PARTS[pp][0].lower())} {pct(k['B5']['share'][c][pp], digits=0)}" for pp in PARTS if k["B5"]["end"][c][pp] != 0) for c in FLATS)}.</li>
+<li><b>Zisk celkem</b> navíc s průměrným ročním zhodnocením vloženého 1 mil. Kč: (hodnota dnes / 1 mil.)<sup>1/10</sup> − 1, stejně jako ve variantě E
+({"; ".join(f"{esc(STRATEGIES[c][0])} {pct(k['E']['per_year'][c])}" for c in FLATS)}).</li>
 <li><b>Graf:</b> barvy částí jako v B3/B4, zisk celkem šedě.</li>
 </ul>
 {_post(posts["B5"])}
