@@ -91,6 +91,14 @@ FLATS = ["byt_hypo_najem", "byt_najem"]
 # rented one, told apart by hatching.
 EMPTY = "byt_prazdny"
 EMPTY_LABEL = "Nepronajatý byt bez hypotéky"
+# Variants B3, B4: where a flat's profit comes from (cumulative, CZK). Categorical order of the
+# reference palette.
+PARTS = {  # key: (label, colour)
+    "growth": ("Růst ceny bytu", "#2a78d6"),
+    "rent": ("Nájem", "#eb6834"),
+    "costs": ("Náklady vlastníka", "#1baf7a"),
+    "interest": ("Úroky hypotéky", "#eda100"),
+}
 D_LABELS = {
     EMPTY: "Nepronajatý byt\nbez hypotéky",
     "byt_hypo_najem": "Pronajatý byt\ns 80% hypotékou",
@@ -408,6 +416,26 @@ def flat_strategies(d: Data, sc: Scenario) -> dict:
         "big": big,
         "rent_big": rent(big),
         "costs_big": costs(big),
+        # Net result − OWN split into its sources (repaid principal is the flat's own value, so
+        # the mortgage only costs its interest). Purchase costs are left out.
+        "parts": {
+            "byt_hypo_najem": pd.DataFrame(
+                {
+                    "growth": big * (growth - 1),
+                    "rent": rent(big).cumsum(),
+                    "costs": -costs(big).cumsum(),
+                    "interest": -sched["interest"].reindex(months, fill_value=0.0).cumsum(),
+                }
+            ),
+            "byt_najem": pd.DataFrame(
+                {
+                    "growth": small * (growth - 1),
+                    "rent": rent(small).cumsum(),
+                    "costs": -costs(small).cumsum(),
+                    "interest": 0.0,
+                }
+            ),
+        },
     }
 
 
@@ -677,6 +705,163 @@ def chart_b2_cashflow(fb: dict, path: Path) -> dict:
     return {"cf": cf, "tot": tot, "last_neg": last_neg}
 
 
+FLAT_PANELS = {
+    "byt_hypo_najem": "Pronajatý byt s 80% hypotékou (byt za {price})",
+    "byt_najem": "Pronajatý byt bez hypotéky (byt za {price})",
+}
+
+
+def _profit_parts(fl: dict) -> dict:
+    """Variants B3, B4: cumulative profit sources of both rented flats; checks they add up."""
+    parts = fl["parts"]
+    for k in FLATS:
+        gap = (parts[k].sum(axis=1) - (fl["wealth"][k] - OWN)).abs().max()
+        assert gap < 1, f"profit parts of {k} do not add up (purchase costs?)"
+    return parts
+
+
+def _panel_title(ax, k: str, fl: dict) -> None:
+    price = mil(fl["big"], 0) if k == "byt_hypo_najem" else mil(OWN, 0)
+    ax.set_title(FLAT_PANELS[k].format(price=price), loc="left", fontsize=14, weight="bold",
+                 color=INK, pad=10)  # fmt: skip
+
+
+def _parts_legend() -> list:
+    return [plt.matplotlib.patches.Patch(color=c, label=label) for label, c in PARTS.values()] + [
+        plt.matplotlib.lines.Line2D([], [], color=INK, lw=2.4, label="Zisk celkem")
+    ]
+
+
+def chart_b3_parts_time(fl: dict, path: Path) -> dict:
+    """Profit of the variant B flats over time, split into price growth, rent, costs, interest."""
+    parts = _profit_parts(fl)
+    x = fl["months"].to_timestamp()
+    end = {k: parts[k].iloc[-1] for k in FLATS}
+    hypo = end["byt_hypo_najem"]
+    assert hypo["rent"] > -(hypo["costs"] + hypo["interest"]), (
+        "title: rent covered costs + interest"
+    )
+    assert all(e["growth"] > e["rent"] for e in end.values()), "title: growth made most of it"
+
+    def panel(ax, k: str) -> None:
+        p = parts[k]
+        for keys in (("growth", "rent"), ("costs", "interest")):  # stacked up / down from zero
+            base = np.zeros(len(p))
+            for c in keys:
+                top = base + p[c].values
+                ax.fill_between(x, base, top, color=PARTS[c][1], lw=1, edgecolor=SURFACE)
+                base = top
+        net = p.sum(axis=1)
+        ax.plot(x, net.values, color=INK, lw=2.4, solid_capstyle="round")
+        ax.axhline(0, color=INK2, lw=1)
+        _clean(ax)
+        ax.yaxis.set_major_formatter(FuncFormatter(_mil_axis))
+        ax.tick_params(labelsize=11)
+        ax.set_xlim(x[0], x[-1])
+        ax.xaxis.set_major_locator(plt.matplotlib.dates.YearLocator(2))
+        ax.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter("%Y"))
+        lo, hi = (p.clip(upper=0).sum(axis=1).min(), p.clip(lower=0).sum(axis=1).max())
+        ax.set_ylim(lo - (hi - lo) * 0.06, hi * 1.06)
+        # End labels: band middles for the parts, line end for the total.
+        e = p.iloc[-1]
+        mids = {"growth": e["growth"] / 2, "rent": e["growth"] + e["rent"] / 2,
+                "costs": e["costs"] / 2, "interest": e["costs"] + e["interest"] / 2}  # fmt: skip
+        labels = [(mids[c], f"{PARTS[c][0]} {'+' if e[c] > 0 else ''}{mil(e[c])}")
+                  for c in PARTS if e[c] != 0]  # fmt: skip
+        labels.append((net.iloc[-1], f"Zisk celkem {mil(net.iloc[-1])}"))
+        gap = (hi - lo) * 0.085
+        ys = _spread([y for y, _ in labels], gap)
+        shift = ax.transData + ScaledTranslation(10 / 72, 0, ax.figure.dpi_scale_trans)
+        for (_, text), ly in zip(labels, ys, strict=True):
+            ax.text(x[-1], ly, text, transform=shift, va="center", fontsize=11, color=INK,
+                    weight="bold" if text.startswith("Zisk") else "normal")  # fmt: skip
+        _panel_title(ax, k, fl)
+
+    def draw(ax) -> None:
+        ax.set_axis_off()
+        panel(ax.inset_axes([0, 0.58, 1, 0.42]), "byt_hypo_najem")
+        panel(ax.inset_axes([0, 0, 1, 0.42]), "byt_najem")
+
+    social_image(
+        path,
+        ("Nájem pokryl náklady i úroky,", "zisk z bytu ale udělal hlavně růst ceny"),
+        [
+            f"Zisk z 1 mil. Kč vloženého v {qlabel(START_Q)} do pronajatého bytu (varianta B), načítaný od začátku.",
+            "Nad nulou příjmy: růst ceny bytu a vybraný nájem. Pod nulou výdaje: náklady vlastníka",
+            "a zaplacené úroky (splacená jistina zůstává v bytě, není to náklad). Černá čára = zisk celkem.",
+            f"Nájem {pct(GROSS_YIELD)} ceny ročně, 1 měsíc prázdný; náklady {pct(OWNER_COST, digits=0)} ceny. Každý graf má vlastní měřítko.",
+        ],
+        draw,
+        axes_rect=(0.1, 0.17, 0.58, 0.575),
+        legend=_parts_legend(),
+        source=SOURCE_B,
+    )
+    return {"end": end}
+
+
+def chart_b4_parts(fl: dict, path: Path) -> dict:
+    """Variant B3 without time: waterfall from the 1 mil. Kč put in to today's value, per flat."""
+    parts = _profit_parts(fl)
+    end = {k: parts[k].iloc[-1] for k in FLATS}
+
+    def panel(ax, k: str) -> None:
+        e = end[k]
+        rows = [("Vloženo", 0.0, OWN, MUTED, mil(OWN))]
+        level = OWN
+        for c in PARTS:
+            if e[c] == 0:
+                continue
+            sign = "+ " if e[c] > 0 else "− "
+            rows.append((sign + PARTS[c][0].lower(), level, level + e[c], PARTS[c][1],
+                         ("+" if e[c] > 0 else "") + mil(e[c])))  # fmt: skip
+            level += e[c]
+        rows.append(("= Hodnota dnes", 0.0, level, INK2, mil(level)))
+        y = np.arange(len(rows))[::-1]
+        for yi, (_, a, b, color, _) in zip(y, rows, strict=True):
+            ax.barh(yi, b - a, left=a, color=color, height=0.62)
+        for yi, (_, a, b, _, text) in zip(y, rows, strict=True):
+            bold = text == rows[-1][4]
+            ax.text(max(a, b) + level * 0.015, yi, text, va="center", fontsize=12, color=INK,
+                    weight="bold" if bold else "normal")  # fmt: skip
+        # Thin connectors from one bar's end to the next bar's start.
+        for i in range(len(rows) - 1):
+            b0 = rows[i][2]
+            ax.plot([b0, b0], [y[i] - 0.31, y[i + 1] + 0.31], color=AXIS, lw=1)
+        ax.set_yticks(y, [r[0] for r in rows], fontsize=12.5)
+        _clean(ax, "x")
+        ax.xaxis.set_major_formatter(FuncFormatter(_mil_axis))
+        ax.tick_params(labelsize=11)
+        ax.set_xlim(0, level * 1.22)
+        ax.set_ylim(-0.6, len(rows) - 0.4)
+        _panel_title(ax, k, fl)
+
+    def draw(ax) -> None:
+        ax.set_axis_off()
+        panel(ax.inset_axes([0, 0.56, 1, 0.44]), "byt_hypo_najem")
+        panel(ax.inset_axes([0, 0, 1, 0.38]), "byt_najem")
+
+    hypo = end["byt_hypo_najem"]
+    profit = hypo.sum()
+    assert hypo["growth"] / profit > 0.5, "title: growth made most of the profit"
+    social_image(
+        path,
+        (
+            f"Z {mil(profit)} zisku bytu na hypotéku",
+            f"{mil(hypo['growth'])} udělal růst ceny, nájem {mil(hypo['rent'])}",
+        ),
+        [
+            f"Odkud se vzal zisk z 1 mil. Kč vloženého v {qlabel(START_Q)} do pronajatého bytu (varianta B),",
+            f"stav v {qlabel(END_Q)}. Růst ceny podle indexu ČSÚ, nájem {pct(GROSS_YIELD)} ceny ročně (1 měsíc prázdný),",
+            f"náklady vlastníka {pct(OWNER_COST, digits=0)} ceny ročně, úroky z hypotéky (sazba {pct(fl['sched']['rate'].iloc[0])}, od 2021 {pct(fl['sched']['rate'].iloc[-1])}).",
+            "Splacená jistina není náklad — zůstává v hodnotě bytu. Každý graf má vlastní měřítko.",
+        ],
+        draw,
+        axes_rect=(0.3, 0.12, 0.62, 0.65),
+        source=SOURCE_B,
+    )
+    return {"end": end}
+
+
 def chart_c_regions(regions: dict, path: Path) -> dict:
     rows = []
     for reg, label in (("mimo", "mimo Prahu"), ("cr", "průměr ČR"), ("praha", "Praha")):
@@ -880,6 +1065,10 @@ def post_texts(base: dict, regions: dict, rob: pd.DataFrame, k: dict, infl: pd.D
     calm_y = (1 + calm).prod() ** (1 / len(calm)) - 1
     irr_hypo = rob["IRR Pronajatý byt s hypotékou"]
     v, py = k["E"]["value"], k["E"]["per_year"]
+    e3h, e3c = k["B3"]["end"]["byt_hypo_najem"], k["B3"]["end"]["byt_najem"]
+    net = fb["parts"]["byt_hypo_najem"].sum(axis=1)
+    peak = net.loc[:"2023-12"].idxmax()
+    dip = net[peak] - net.loc[peak:"2024-12"].min()
     return {
         "B": (
             f"Milion korun v roce 2016. Kam s ním? Dnes by z něj bylo: pronajatý byt s 80% hypotékou {mil(w['byt_hypo_najem'])}, akcie S&P 500 {mil(w['sp500'])}, pronajatý byt bez hypotéky {mil(w['byt_najem'])}, zlato {mil(w['zlato'])} a spořicí účet {mil(w['sporici'])}.\n\n"
@@ -893,6 +1082,18 @@ def post_texts(base: dict, regions: dict, rob: pd.DataFrame, k: dict, infl: pd.D
             f", od {(k['B2']['last_neg'] + 1).strftime('%m/%Y')} každý měsíc v plusu. Nájem rostl, splátka ne, a dnes byt vydělává {kc(cf['byt_hypo_najem'].iloc[-1])} měsíčně. Za 10 let celkem {mil(tot['byt_hypo_najem'])}.\n\n"
             f"Pronajatý byt bez hypotéky (za 1 mil. Kč) byl v plusu od začátku, dnes {kc(cf['byt_najem'].iloc[-1])} měsíčně, za 10 let {mil(tot['byt_najem'])}.\n\n"
             "Pozor na dnešek: s hypotékou kolem 5 % a nižším výnosem z nájmu by stejný byt začínal s cashflow hluboko v minusu. Než koupíte, spočítejte si, kolik budete měsíčně doplácet."
+        ),
+        "B3": (
+            f"Odkud se bere zisk z pronajatého bytu? U bytu s 80% hypotékou (milion z roku 2016 jako akontace) za 10 let: růst ceny +{mil(e3h['growth'])}, nájem +{mil(e3h['rent'])}, náklady vlastníka {mil(e3h['costs'])}, úroky hypotéky {mil(e3h['interest'])}. Zisk celkem {mil(e3h.sum())}.\n\n"
+            f"Nájem tedy zaplatil náklady i úroky a ještě zbylo {mil(e3h['rent'] + e3h['costs'] + e3h['interest'])}. Hlavní práci ale udělal růst ceny — a ten jistý není: když ceny bytů v letech 2022–23 klesly, zisk z bytu na hypotéku se na čas snížil o {mil(dip)}. Nájem přitom přibýval každý měsíc.\n\n"
+            f"Bez hypotéky (byt za milion): růst ceny +{mil(e3c['growth'])}, nájem +{mil(e3c['rent'])}, náklady {mil(e3c['costs'])}, zisk {mil(e3c.sum())}. Poměr růstu ceny a nájmu je stejný — hypotéka ho jen znásobí, protože růst ceny dostáváte z celé ceny bytu, ne jen z vlastních peněz.\n\n"
+            "Pro pronajímatele: nájem je stabilní, ale menší část výsledku. O tom, jak investice dopadne, rozhoduje hlavně to, co udělá cena bytu."
+        ),
+        "B4": (
+            f"Milion v roce 2016 jako 20% akontace na pronajatý byt za {mil(fb['big'], 0)}. Co z něj za 10 let bylo: vloženo 1,0 mil. Kč, růst ceny bytu +{mil(e3h['growth'])}, nájem +{mil(e3h['rent'])}, náklady vlastníka {mil(e3h['costs'])}, úroky hypotéky {mil(e3h['interest'])}. Dnes {mil(OWN + e3h.sum())}.\n\n"
+            f"Z příjmů bytu (růst ceny + nájem) tvořil nájem jen {pct(e3h['rent'] / (e3h['growth'] + e3h['rent']), digits=0)}. Zbytek je růst ceny, který se projeví až při prodeji (nebo jako vyšší hodnota zástavy).\n\n"
+            f"Úroky za 10 let stály {mil(-e3h['interest'])} — díky sazbě kolem {pct(fb['sched']['rate'].iloc[0], digits=0)}. Splátky byly vyšší, ale splacená jistina není náklad: zůstává v hodnotě bytu jako menší dluh.\n\n"
+            f"Bez hypotéky (byt za milion): růst ceny +{mil(e3c['growth'])}, nájem +{mil(e3c['rent'])}, náklady {mil(e3c['costs'])}, dnes {mil(OWN + e3c.sum())}."
         ),
         "C": (
             f"Byty mimo Prahu zdražily za 10 let {times(m['fl']['equity']['byt_najem'].iloc[-1] / OWN)}, pražské „jen“ {times(p['fl']['equity']['byt_najem'].iloc[-1] / OWN)}.\n\n"
@@ -1064,6 +1265,30 @@ Stejný ukazatel ČNB používá jako „výnos z pronájmu bytu“ (roční ná
 </ul>
 {_post(posts["B2"])}
 
+<h2>Varianta B3 — odkud se bere zisk z bytu, v čase</h2>
+{_img(imgs["B3"])}
+<h3>Jak graf vznikl</h3>
+<ul>
+<li><b>Stejné byty a předpoklady jako B</b> (s hypotékou a bez), zisk = výsledek bytu z B − vložený 1 mil. Kč, načítaný od května 2016.</li>
+<li><b>Rozklad zisku:</b> růst ceny = cena<sub>0</sub> × (index<sub>t</sub> / index<sub>0</sub> − 1); nájem = součet vybraného nájmu; náklady vlastníka = součet nákladů;
+úroky = součet zaplacených úroků. Splátka = úrok + jistina, a splacená jistina zvyšuje čistou hodnotu bytu (menší dluh) — proto se mezi náklady počítají jen úroky.
+Součet čtyř částí se přesně rovná zisku z B (kontrolováno v kódu).</li>
+<li><b>Konec období:</b> {"; ".join(f"{esc(STRATEGIES[c][0])}: " + ", ".join(f"{esc(PARTS[pp][0].lower())} {mil(k['B3']['end'][c][pp])}" for pp in PARTS if k["B3"]["end"][c][pp] != 0) for c in FLATS)}.</li>
+<li><b>Graf:</b> dva panely (každý vlastní měřítko, aby byl vidět i byt bez hypotéky), skládané plochy — nad nulou příjmy, pod nulou výdaje, černá čára = zisk celkem.
+Barvy částí v pořadí referenční palety; nesouvisí s barvami strategií v ostatních variantách.</li>
+<li><b>Pozor:</b> nájem a náklady jsou sečtené bez úroku a bez daně z příjmu; růst ceny je „na papíře“ (bez nákladů na prodej).</li>
+</ul>
+{_post(posts["B3"])}
+
+<h2>Varianta B4 — odkud se bere zisk z bytu, bez časové osy</h2>
+{_img(imgs["B4"])}
+<h3>Jak graf vznikl</h3>
+<ul>
+<li><b>Stejný rozklad jako B3</b>, jen stav na konci období jako vodopádový graf: vloženo 1 mil. Kč → + růst ceny → + nájem → − náklady → − úroky → hodnota dnes (= výsledek z B).</li>
+<li><b>Graf:</b> vodorovné plovoucí sloupce, tenké spojnice mezi koncem a začátkem navazujících sloupců; vložený a konečný sloupec šedě (barvy částí jako v B3). Každý panel vlastní měřítko.</li>
+</ul>
+{_post(posts["B4"])}
+
 <h2>Varianta C — Praha vs. zbytek republiky</h2>
 {_img(imgs["C"])}
 <h3>Jak graf vznikl</h3>
@@ -1189,7 +1414,7 @@ S&amp;P 500 s dividendami; ověřeno proti FRED), Světová banka (zlato), Euros
 <li>Stažení skriptem <code>download.py</code> do <code>{esc(str(raw.relative_to(monaco.ROOT)))}</code>.</li>
 <li>Zpracování: převod všeho na měsíční řady v Kč, interpolace čtvrtletního indexu bytů.</li>
 <li>Výpočet pěti strategií pro jednorázový 1 mil. Kč: hodnota v čase, měsíční cashflow pronajatých bytů, roční výnos (IRR).</li>
-<li>Kandidátní grafy B, B2, C, D, E (varianta A se stejnými měsíčními vklady byla vyřazena), kontrola robustnosti (15 variant), kontrola zdrojových dat (Shiller vs. FRED, HICP vs. CPI ČSÚ).</li>
+<li>Kandidátní grafy B, B2, B3, B4, C, D, E (varianta A se stejnými měsíčními vklady byla vyřazena), kontrola robustnosti (15 variant), kontrola zdrojových dat (Shiller vs. FRED, HICP vs. CPI ČSÚ).</li>
 <li>Výstupy: obrázky 1080 × 1350 px, texty příspěvků, tento report, data v CSV.</li>
 </ol>
 
@@ -1269,6 +1494,7 @@ def main() -> None:
     (out / "data").mkdir()
     base["paths"].to_csv(out / "data" / "strategie_mesicne.csv")
     base["fl"]["cf"].to_csv(out / "data" / "byty_cashflow_mesicne.csv")
+    pd.concat(base["fl"]["parts"], axis=1).to_csv(out / "data" / "byty_zdroje_zisku_mesicne.csv")
     base["fl"]["sched"].to_csv(out / "data" / "hypoteka_splatky.csv")
     base["lump"].to_csv(out / "data" / "jednorazove_1mil.csv")
     pd.DataFrame({r: v["final"] for r, v in regions.items()}).to_csv(out / "data" / "regiony.csv")
@@ -1279,6 +1505,8 @@ def main() -> None:
     imgs = {
         "B": out / "B_jednorazove_1mil.png",
         "B2": out / "B2_cashflow_bytu.png",
+        "B3": out / "B3_zdroje_zisku_v_case.png",
+        "B4": out / "B4_zdroje_zisku.png",
         "C": out / "C_praha_vs_regiony.png",
         "D": out / "D_rocni_vynos.png",
         "E": out / "E_hodnota_a_zisk_rocne.png",
@@ -1288,6 +1516,8 @@ def main() -> None:
     k = {
         "B": chart_b_lump(base, imgs["B"]),
         "B2": chart_b2_cashflow(base["fl"], imgs["B2"]),
+        "B3": chart_b3_parts_time(base["fl"], imgs["B3"]),
+        "B4": chart_b4_parts(base["fl"], imgs["B4"]),
         "C": chart_c_regions(regions, imgs["C"]),
         "D": chart_d_irr(base, imgs["D"]),
         "E": chart_e_value(base, imgs["E"]),
