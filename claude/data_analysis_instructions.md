@@ -90,3 +90,8 @@ Generate the images, post texts and the HTML report described in "Output" (all i
 Check the rendered images (overflowing text, wrong numbers, Czech grammar and number format, e.g.
 `3,5 %`, `12 000`) and make sure every number in the post texts is computed from the data, not typed in.
 
+
+### 7. Open the report
+
+After finishing the analysis (including every later change that regenerates the outputs), always
+open the run's `report.html` in Safari: `open -a Safari outputs/<analysis_name>/<yymmdd_hhmmss>/report.html`.
