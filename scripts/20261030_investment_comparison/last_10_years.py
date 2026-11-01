@@ -768,50 +768,52 @@ def chart_d_irr(base: dict, path: Path) -> dict:
 
 
 def chart_e_value(base: dict, path: Path) -> dict:
-    """Variant D's bars (incl. the empty flat), but valued as in B: final value and profit per year."""
+    """Variant D's bars (incl. the empty flat), but valued as in B: yearly return of the final value."""
     fl, lump = base["fl"], base["lump"]
-    v = pd.concat([base["final"], fl["wealth"][[EMPTY]].iloc[-1]]).sort_values()
-    py = v.map(lambda x: per_year(x, fl["months"]))
+    v = pd.concat([base["final"], fl["wealth"][[EMPTY]].iloc[-1]])
+    py = v.map(lambda x: per_year(x, fl["months"])).sort_values()
+    v = v[py.index]
     infl = lump["inflace"].iloc[-1]
+    infl_y = per_year(infl, fl["months"])
     assert py.idxmax() == "byt_hypo_najem" and py.idxmin() == "sporici", "title claims"
-    assert v["sporici"] < infl < v.drop("sporici").min(), (
+    assert py["sporici"] < infl_y < py.drop("sporici").min(), (
         "subtitle claims only savings lost to inflation"
     )
 
     def draw(ax) -> None:
-        y = np.arange(len(v))
-        colors = [STRATEGIES["byt_najem" if k == EMPTY else k][1] for k in v.index]
-        bars = ax.barh(y, v.values, color=colors, height=0.6)
-        bars[list(v.index).index(EMPTY)].set(hatch="///", edgecolor=SURFACE, linewidth=0)
+        y = np.arange(len(py))
+        colors = [STRATEGIES["byt_najem" if k == EMPTY else k][1] for k in py.index]
+        bars = ax.barh(y, py.values * 100, color=colors, height=0.6)
+        bars[list(py.index).index(EMPTY)].set(hatch="///", edgecolor=SURFACE, linewidth=0)
         ax.set_yticks(
-            y, [D_LABELS[k] if k in D_LABELS else STRATEGIES[k][0] for k in v.index], fontsize=13
+            y, [D_LABELS[k] if k in D_LABELS else STRATEGIES[k][0] for k in py.index], fontsize=13
         )
-        dx = v.max() * 0.015
-        for i, (val, p) in enumerate(zip(v.values, py.values, strict=True)):
-            x = max(val, infl) + dx  # clear of the inflation line
-            ax.text(x, i + 0.03, mil(val), va="bottom", fontsize=13, color=INK, weight="bold")
-            ax.text(x, i - 0.03, f"{pct(p)} ročně", va="top", fontsize=11, color=INK2)
-        ax.axvline(infl, color=MUTED, lw=1.4, ls="--")
-        ax.text(infl, len(v) - 0.45, f" inflace: dnešní hodnota 1 mil. Kč je {mil(infl)}", color=INK2,
+        dx = py.max() * 100 * 0.015
+        for i, (p, val) in enumerate(zip(py.values, v.values, strict=True)):
+            x = max(p, infl_y) * 100 + dx  # clear of the inflation line
+            ax.text(x, i + 0.03, pct(p), va="bottom", fontsize=13, color=INK, weight="bold")
+            ax.text(x, i - 0.03, f"1 mil. → {mil(val)}", va="top", fontsize=11, color=INK2)
+        ax.axvline(infl_y * 100, color=MUTED, lw=1.4, ls="--")
+        ax.text(infl_y * 100, len(py) - 0.45, f" inflace {pct(infl_y)} ročně (HICP)", color=INK2,
                 fontsize=11, va="bottom")  # fmt: skip
         _clean(ax, "x")
-        ax.xaxis.set_major_formatter(FuncFormatter(_mil_axis))
-        ax.set_xlim(0, v.max() * 1.3)
-        ax.set_ylim(-0.6, len(v) - 0.1)
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda val, _: f"{val:.0f} %"))
+        ax.set_xlim(0, py.max() * 100 * 1.3)
+        ax.set_ylim(-0.6, len(py) - 0.1)
 
     social_image(
         path,
         (
-            f"Milion z roku 2016: byt na hypotéku {mil(v['byt_hypo_najem'])},",
-            f"tj. {pct(py['byt_hypo_najem'])} ročně, spořák {pct(py['sporici'])} ročně",
+            f"Pronajatý byt na hypotéku vydělával {pct(py['byt_hypo_najem'], digits=0)} ročně,",
+            f"akcie {pct(py['sp500'], digits=0)}, spořicí účet {pct(py['sporici'], digits=0)}",
         ),
         [
-            f"Hodnota 1 mil. Kč vloženého jednorázově v {qlabel(START_Q)}, stav v {qlabel(END_Q)},",
-            "a průměrné roční zhodnocení (složené, jako úrok z úroku). Počítáno jako ve variantě B:",
-            "u bytů cena − dluh + nájem − náklady − splátky, doplatky z vlastní kapsy odečtené.",
+            f"Průměrný roční zisk 1 mil. Kč vloženého jednorázově, {qlabel(START_Q)} → {qlabel(END_Q)}",
+            "(složeně, jako úrok z úroku). Počítáno z konečné hodnoty jako ve variantě B: u bytů",
+            "cena − dluh + nájem − náklady − splátky, doplatky z vlastní kapsy odečtené.",
             f"Nájem {pct(GROSS_YIELD)} ceny ročně (1 měsíc prázdný), náklady {pct(OWNER_COST, digits=0)} ceny i u nepronajatého bytu.",
             "Spořicí účet: sazby ČNB nových vkladů do 1 roku, po 15% dani. Spořák jako jediný",
-            f"prohrál s inflací (to, co stálo 1 mil. Kč v roce 2016, stojí dnes {mil(infl)}).",
+            "prohrál s inflací (ta byla tak vysoko hlavně kvůli letům 2022–23 s inflací přes 10 %).",
         ],
         draw,
         axes_rect=(0.3, 0.18, 0.62, 0.54),
@@ -905,10 +907,10 @@ def post_texts(base: dict, regions: dict, rob: pd.DataFrame, k: dict, infl: pd.D
             "Je to ale ohlédnutí za výjimečnou dekádou. Stejný výpočet pro příštích 10 let začíná s dvojnásobnou sazbou a nižším výnosem z nájmu. Páka zvětšuje zisky i ztráty."
         ),
         "E": (
-            f"Kolik by dnes bylo z milionu z roku 2016? V pronajatém bytě s 80% hypotékou {mil(v['byt_hypo_najem'])}, tedy zhodnocení v průměru {pct(py['byt_hypo_najem'])} ročně.\n\n"
-            f"Akcie S&P 500 {mil(v['sp500'])} ({pct(py['sp500'])} ročně), pronajatý byt bez hypotéky {mil(v['byt_najem'])} ({pct(py['byt_najem'])}), zlato {mil(v['zlato'])} ({pct(py['zlato'])}), nepronajatý byt bez hypotéky {mil(v[EMPTY])} ({pct(py[EMPTY])}) a spořicí účet po dani jen {mil(v['sporici'])} ({pct(py['sporici'])} ročně).\n\n"
-            f"Pronájem bytu bez hypotéky přinesl proti prázdnému bytu {mil(v['byt_najem'] - v[EMPTY])} navíc. Většinu zisku udělal růst cen bytů, ne nájem. Hypotéka ho pak znásobila: s ní se kupoval byt za {mil(fb['big'], 0)} místo za 1 mil. Kč.\n\n"
-            f"Pozor, inflace: to, co stálo milion v roce 2016, stojí dnes {mil(k['E']['infl'])}. Spořicí účet tak reálně ztrácel a i ostatní zisky jsou v dnešních korunách menší, než vypadají."
+            f"Milion vložený v roce 2016 do pronajatého bytu s 80% hypotékou vydělával v průměru {pct(py['byt_hypo_najem'])} ročně. Dnes by z něj bylo {mil(v['byt_hypo_najem'])}.\n\n"
+            f"Akcie S&P 500 vydělávaly {pct(py['sp500'])} ročně ({mil(v['sp500'])}), pronajatý byt bez hypotéky {pct(py['byt_najem'])} ({mil(v['byt_najem'])}), zlato {pct(py['zlato'])} ({mil(v['zlato'])}), nepronajatý byt bez hypotéky {pct(py[EMPTY])} ({mil(v[EMPTY])}) a spořicí účet po dani jen {pct(py['sporici'])} ({mil(v['sporici'])}).\n\n"
+            f"Pronájem přidal bytu bez hypotéky proti prázdnému bytu {pct(py['byt_najem'] - py[EMPTY], digits=1).replace(' %', ' procentního bodu')} ročně. Většinu zisku udělal růst cen bytů, ne nájem. Hypotéka ho pak znásobila: s ní se kupoval byt za {mil(fb['big'], 0)} místo za 1 mil. Kč.\n\n"
+            f"Pozor, inflace: to, co stálo milion v roce 2016, stojí dnes {mil(k['E']['infl'])}. Inflace byla {pct(per_year(k['E']['infl'], fb['months']))} ročně, spořicí účet tak reálně ztrácel a i ostatní zisky jsou v dnešních korunách menší, než vypadají."
         ),
     }
 
@@ -1106,8 +1108,8 @@ u bytů cena − dluh + součet měsíčního cashflow (doplatky odečtené bez 
 je to totéž číslo jako v D. U bytů se liší: D (IRR) bere v úvahu, kdy se doplácelo a kdy přebytky přišly, E bere jen konečný stav jako v B
 (peníze z cashflow bez úroku). Rozdíl: {"; ".join(f"{esc(D_LABELS[c].replace(chr(10), ' '))} E {pct(k['E']['per_year'][c])} vs. D {pct(base['irr'][c])}" for c in (*FLATS, EMPTY))}.</li>
 <li><b>Hodnoty:</b> {"; ".join(f"{esc(D_LABELS.get(c, STRATEGIES.get(c, (c,))[0]).replace(chr(10), ' '))} {mil(k['E']['value'][c])} ({pct(k['E']['per_year'][c])} ročně)" for c in k["E"]["value"].index[::-1])}.</li>
-<li><b>Inflace:</b> svislá čárkovaná čára = kolik korun dnes odpovídá 1 mil. Kč z roku 2016 (HICP), {mil(k["E"]["infl"])}.</li>
-<li><b>Graf:</b> vodorovné sloupce seřazené podle konečné hodnoty, barvy jako v D (nepronajatý byt šrafovaně).</li>
+<li><b>Inflace:</b> svislá čárkovaná čára = průměrná roční inflace HICP; 1 mil. Kč z roku 2016 dnes odpovídá {mil(k["E"]["infl"])}.</li>
+<li><b>Graf:</b> vodorovné sloupce = průměrné roční zhodnocení v %, seřazené podle něj; pod procentem konečná hodnota. Barvy jako v D (nepronajatý byt šrafovaně).</li>
 </ul>
 {_post(posts["E"])}
 
