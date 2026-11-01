@@ -862,15 +862,16 @@ def chart_b4_parts(fl: dict, path: Path) -> dict:
     return {"end": end}
 
 
-def chart_b5_parts_bars(fl: dict, path: Path) -> dict:
-    """Variant B4 as bars on one shared scale: each profit part with its share of the total profit."""
+def _parts_bars(ax, fl: dict, keys: list[str]) -> dict:
+    """Variants B5, B6: profit parts of the given flats as bars on one shared scale, each with its
+    share of the total profit; the total with the yearly return on the 1 mil. Kč put in."""
     parts = _profit_parts(fl)
-    end = {k: parts[k].iloc[-1] for k in FLATS}
+    end = {k: parts[k].iloc[-1] for k in keys}
     share = {k: e / e.sum() for k, e in end.items()}
     rows = []  # (y, label, value, colour, share or None); groups top to bottom
     y = 0.0
     groups = []
-    for k in FLATS:
+    for k in keys:
         groups.append((y, k))
         y -= 0.85
         for c in PARTS:
@@ -881,35 +882,44 @@ def chart_b5_parts_bars(fl: dict, path: Path) -> dict:
         y -= 1.5
     hi = max(r[2] for r in rows)
     lo = min(r[2] for r in rows)
-    rent_share = [share[k]["rent"] for k in FLATS]
+
+    ys = [r[0] for r in rows]
+    ax.barh(ys, [r[2] for r in rows], color=[r[3] for r in rows], height=0.66)
+    ax.set_yticks(ys, [r[1] for r in rows], fontsize=12.5)
+    dx = hi * 0.012
+    for yi, label, val, _, sh in rows:
+        x = max(val, 0) + dx
+        sign = "+" if val > 0 and label != "Zisk celkem" else ""
+        note = (f"{pct(sh, digits=0)} zisku" if sh is not None
+                else f"{pct(per_year(OWN + val, fl['months']))} ročně z vkladu")  # fmt: skip
+        ax.text(x, yi + 0.02, sign + mil(val), va="bottom", fontsize=12.5, color=INK,
+                weight="bold")  # fmt: skip
+        ax.text(x, yi - 0.02, note, va="top", fontsize=11, color=INK2)
+    price = {"byt_hypo_najem": mil(fl["big"], 0), "byt_najem": mil(OWN, 0)}
+    bounds = [g[0] for g in groups] + [-np.inf]
+    for (gy, k), below in zip(groups, bounds[1:], strict=True):
+        ax.text(-0.45, gy, f"{STRATEGIES[k][0]} (byt za {price[k]})", fontsize=14,
+                weight="bold", color=INK, va="center", transform=ax.get_yaxis_transform(),
+                bbox={"facecolor": SURFACE, "edgecolor": "none", "pad": 3})  # fmt: skip
+        span = [r[0] for r in rows if below < r[0] < gy]  # zero line only along the rows
+        ax.plot([0, 0], [min(span) - 0.45, max(span) + 0.45], color=INK2, lw=1)
+    _clean(ax, "x")
+    ax.xaxis.set_major_formatter(FuncFormatter(_mil_axis))
+    ax.tick_params(labelsize=11)
+    ax.set_xlim(lo * 1.6, hi * 1.3)
+    ax.set_ylim(y + 1.0, 0.5)
+    return {"end": end, "share": share}
+
+
+def chart_b5_parts_bars(fl: dict, path: Path) -> dict:
+    """Variant B4 as bars on one shared scale: each profit part with its share of the total profit."""
+    end = {k: fl["parts"][k].iloc[-1] for k in FLATS}  # the title needs the shares before drawing
+    rent_share = [end[k]["rent"] / end[k].sum() for k in FLATS]
     assert all(s_ < 0.5 for s_ in rent_share), "title: rent made the smaller part"
+    res: dict = {}
 
     def draw(ax) -> None:
-        ys = [r[0] for r in rows]
-        ax.barh(ys, [r[2] for r in rows], color=[r[3] for r in rows], height=0.66)
-        ax.set_yticks(ys, [r[1] for r in rows], fontsize=12.5)
-        dx = hi * 0.012
-        for yi, label, val, _, sh in rows:
-            x = max(val, 0) + dx
-            sign = "+" if val > 0 and label != "Zisk celkem" else ""
-            note = (f"{pct(sh, digits=0)} zisku" if sh is not None
-                    else f"{pct(per_year(OWN + val, fl['months']))} ročně z vkladu")  # fmt: skip
-            ax.text(x, yi + 0.02, sign + mil(val), va="bottom", fontsize=12.5, color=INK,
-                    weight="bold")  # fmt: skip
-            ax.text(x, yi - 0.02, note, va="top", fontsize=11, color=INK2)
-        price = {"byt_hypo_najem": mil(fl["big"], 0), "byt_najem": mil(OWN, 0)}
-        bounds = [g[0] for g in groups] + [-np.inf]
-        for (gy, k), below in zip(groups, bounds[1:], strict=True):
-            ax.text(-0.45, gy, f"{STRATEGIES[k][0]} (byt za {price[k]})", fontsize=14,
-                    weight="bold", color=INK, va="center", transform=ax.get_yaxis_transform(),
-                    bbox={"facecolor": SURFACE, "edgecolor": "none", "pad": 3})  # fmt: skip
-            span = [r[0] for r in rows if below < r[0] < gy]  # zero line only along the rows
-            ax.plot([0, 0], [min(span) - 0.45, max(span) + 0.45], color=INK2, lw=1)
-        _clean(ax, "x")
-        ax.xaxis.set_major_formatter(FuncFormatter(_mil_axis))
-        ax.tick_params(labelsize=11)
-        ax.set_xlim(lo * 1.6, hi * 1.3)
-        ax.set_ylim(y + 1.0, 0.5)
+        res.update(_parts_bars(ax, fl, FLATS))
 
     rmin, rmax = (round(v * 100) for v in sorted(rent_share)[:: len(rent_share) - 1])
     rent_txt = f"{rmin} %" if rmin == rmax else f"{rmin}–{rmax} %"
@@ -928,7 +938,39 @@ def chart_b5_parts_bars(fl: dict, path: Path) -> dict:
         axes_rect=(0.3, 0.12, 0.6, 0.62),
         source=SOURCE_B,
     )
-    return {"end": end, "share": share}
+    return res
+
+
+def chart_b6_hypo_parts(fl: dict, path: Path) -> dict:
+    """Variant B5 for the rented flat with a mortgage only."""
+    k = "byt_hypo_najem"
+    e = fl["parts"][k].iloc[-1]
+    share = e / e.sum()
+    assert share["rent"] < 0.5 < share["growth"], "title: growth made most of the profit"
+    res: dict = {}
+
+    def draw(ax) -> None:
+        res.update(_parts_bars(ax, fl, [k]))
+
+    social_image(
+        path,
+        (
+            f"Byt na hypotéku: {pct(share['growth'], digits=0)} zisku udělal",
+            f"růst ceny, nájem jen {pct(share['rent'], digits=0)}",
+        ),
+        [
+            f"Odkud se vzal zisk z 1 mil. Kč vloženého v {qlabel(START_Q)} jako 20% akontace na pronajatý byt",
+            f"za {mil(fl['big'], 0)} (varianta B), stav v {qlabel(END_Q)}. Procenta = podíl na zisku celkem",
+            "(hodnota dnes − vložený 1 mil. Kč), části se sčítají na 100 %.",
+            f"Nájem {pct(GROSS_YIELD)} ceny ročně (1 měsíc prázdný), náklady vlastníka {pct(OWNER_COST, digits=0)} ceny ročně.",
+            "Splacená jistina není náklad — zůstává v hodnotě bytu, počítají se jen úroky.",
+            "U zisku celkem průměrné roční zhodnocení vkladu 1 mil. Kč (složeně, jako ve variantě E).",
+        ],
+        draw,
+        axes_rect=(0.3, 0.2, 0.6, 0.5),
+        source=SOURCE_B,
+    )
+    return res
 
 
 def chart_c_regions(regions: dict, path: Path) -> dict:
@@ -1171,6 +1213,12 @@ def post_texts(base: dict, regions: dict, rob: pd.DataFrame, k: dict, infl: pd.D
             f"Ve stejném měřítku je dobře vidět, co udělala hypotéka: nájem i růst ceny se počítají z ceny bytu, a ta byla s hypotékou pětkrát vyšší. Úroky přitom stály jen {mil(-e3h['interest'])}.\n\n"
             "Nájem je jistý a pravidelný, ale o výsledku rozhoduje cena bytu. Kdo kupuje kvůli nájmu, měl by počítat i s tím, že cena 10 let neporoste."
         ),
+        "B6": (
+            f"Milion vložený v roce 2016 jako 20% akontace na pronajatý byt za {mil(fb['big'], 0)} je dnes {mil(OWN + e3h.sum())}, v průměru {pct(per_year(OWN + e3h.sum(), fb['months']))} ročně. Odkud se zisk {mil(e3h.sum())} vzal?\n\n"
+            f"Růst ceny bytu {pct(s5h['growth'], digits=0)} zisku (+{mil(e3h['growth'])}), nájem {pct(s5h['rent'], digits=0)} (+{mil(e3h['rent'])}). Náklady vlastníka ubraly {pct(-s5h['costs'], digits=0)} ({mil(e3h['costs'])}), úroky hypotéky {pct(-s5h['interest'], digits=0)} ({mil(e3h['interest'])}).\n\n"
+            "Nájem tedy pokryl náklady i úroky, ale velký zisk přišel z ceny bytu — a ten uvidíte až při prodeji. Hypotéka ho znásobila, protože růst ceny dostáváte z celé ceny bytu, ne jen z vlastních peněz.\n\n"
+            "Kdo dnes kupuje kvůli nájmu, měl by si spočítat, jak by investice dopadla, kdyby cena bytu nerostla."
+        ),
         "C": (
             f"Byty mimo Prahu zdražily za 10 let {times(m['fl']['equity']['byt_najem'].iloc[-1] / OWN)}, pražské „jen“ {times(p['fl']['equity']['byt_najem'].iloc[-1] / OWN)}.\n\n"
             f"S 80% hypotékou se ten rozdíl zvětší. Kdo v roce 2016 dal milion jako akontaci na pronajatý byt mimo Prahu, má dnes po odečtení dluhu a se započtením nájmu, nákladů a splátek {mil(m['final']['byt_hypo_najem'])}. V Praze {mil(p['final']['byt_hypo_najem'])}. Stejný milion v akciích S&P 500 je dnes {mil(w['sp500'])}.\n\n"
@@ -1380,6 +1428,15 @@ Podíl vůči vloženému milionu jsme nepoužili — byl by číselně stejný 
 </ul>
 {_post(posts["B5"])}
 
+<h2>Varianta B6 — zdroje zisku jen pro pronajatý byt s hypotékou</h2>
+{_img(imgs["B6"])}
+<h3>Jak graf vznikl</h3>
+<ul>
+<li><b>Stejný graf jako B5</b>, jen pro pronajatý byt s 80% hypotékou: části zisku jako vodorovné sloupce s podílem na zisku celkem,
+u zisku celkem průměrné roční zhodnocení vkladu (jako E). Stejná čísla a předpoklady jako B.</li>
+</ul>
+{_post(posts["B6"])}
+
 <h2>Varianta C — Praha vs. zbytek republiky</h2>
 {_img(imgs["C"])}
 <h3>Jak graf vznikl</h3>
@@ -1505,7 +1562,7 @@ S&amp;P 500 s dividendami; ověřeno proti FRED), Světová banka (zlato), Euros
 <li>Stažení skriptem <code>download.py</code> do <code>{esc(str(raw.relative_to(monaco.ROOT)))}</code>.</li>
 <li>Zpracování: převod všeho na měsíční řady v Kč, interpolace čtvrtletního indexu bytů.</li>
 <li>Výpočet pěti strategií pro jednorázový 1 mil. Kč: hodnota v čase, měsíční cashflow pronajatých bytů, roční výnos (IRR).</li>
-<li>Kandidátní grafy B, B2, B3, B4, B5, C, D, E (varianta A se stejnými měsíčními vklady byla vyřazena), kontrola robustnosti (15 variant), kontrola zdrojových dat (Shiller vs. FRED, HICP vs. CPI ČSÚ).</li>
+<li>Kandidátní grafy B, B2, B3, B4, B5, B6, C, D, E (varianta A se stejnými měsíčními vklady byla vyřazena), kontrola robustnosti (15 variant), kontrola zdrojových dat (Shiller vs. FRED, HICP vs. CPI ČSÚ).</li>
 <li>Výstupy: obrázky 1080 × 1350 px, texty příspěvků, tento report, data v CSV.</li>
 </ol>
 
@@ -1599,6 +1656,7 @@ def main() -> None:
         "B3": out / "B3_zdroje_zisku_v_case.png",
         "B4": out / "B4_zdroje_zisku.png",
         "B5": out / "B5_rust_ceny_vs_najem.png",
+        "B6": out / "B6_byt_s_hypotekou_zdroje_zisku.png",
         "C": out / "C_praha_vs_regiony.png",
         "D": out / "D_rocni_vynos.png",
         "E": out / "E_hodnota_a_zisk_rocne.png",
@@ -1611,6 +1669,7 @@ def main() -> None:
         "B3": chart_b3_parts_time(base["fl"], imgs["B3"]),
         "B4": chart_b4_parts(base["fl"], imgs["B4"]),
         "B5": chart_b5_parts_bars(base["fl"], imgs["B5"]),
+        "B6": chart_b6_hypo_parts(base["fl"], imgs["B6"]),
         "C": chart_c_regions(regions, imgs["C"]),
         "D": chart_d_irr(base, imgs["D"]),
         "E": chart_e_value(base, imgs["E"]),
